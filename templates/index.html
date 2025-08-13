@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Pixel Place - Collaborative Canvas</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <div class="canvas-container">
+            <div class="canvas-wrapper" id="canvasWrapper">
+                <canvas id="pixelCanvas" width="800" height="600"></canvas>
+                <div class="pixel-preview" id="pixelPreview"></div>
+            </div>
+
+            <!-- Pixel Info Tooltip -->
+            <div class="pixel-info-tooltip" id="pixelInfoTooltip">
+                <div class="pixel-info-content">
+                    <div class="pixel-info-user">User: <span id="pixelUser">-</span></div>
+                    <div class="pixel-info-time">Placed: <span id="pixelTime">-</span></div>
+                </div>
+            </div>
+
+            <!-- Position Display -->
+            <div class="position-display" id="positionDisplay">
+                <div class="position-text">
+                    Region: <span id="regionPos">0,0</span> |
+                    Pixel: <span id="pixelPos">0,0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Floating Minimalist Color Palette -->
+        <div class="color-palette-fixed minimized" id="colorPaletteFixed">
+            <!-- Toggle Button - Always Visible -->
+            <div class="color-palette-toggle" id="colorPaletteToggle" onclick="toggleColorPalette()">
+                <span class="palette-icon">🎨</span>
+                <span class="palette-text">0/10 pixels</span>
+            </div>
+
+            <!-- Drawer Content - Only Visible When Expanded -->
+            <div class="color-palette-content" id="colorPaletteContent">
+                <div class="pixel-bag-info">
+                    <div class="bag-text" id="bagText">Pixels: <span id="pixelCount">0</span></div>
+                    <div class="bag-progress">
+                        <div class="bag-fill" id="bagFill"></div>
+                    </div>
+                </div>
+
+                <div class="color-grid" id="colorGrid"></div>
+            </div>
+        </div>
+
+        <!-- Floating Chat Panel -->
+        <div class="floating-panel chat-panel" id="chatPanel">
+            <div class="panel-header">
+                <div class="panel-title">
+                    <span class="status-indicator status-connecting" id="connectionIndicator"></span>
+                    💬 Chat
+                    <div class="panel-stats">
+                        <span class="ping-display" id="pingDisplay">0ms</span>
+                        <span class="user-count" id="userCount">0 users</span>
+                    </div>
+                </div>
+                <button class="btn btn-icon minimize-btn" onclick="togglePanel('chatPanel')" title="Minimize">−</button>
+            </div>
+
+            <div class="panel-content">
+                <div class="chat-messages" id="chatMessages"></div>
+
+                <div class="chat-input-container">
+                    <input type="text" id="chatInput" class="chat-input" placeholder="Type a message..."
+                        maxlength="200">
+                    <button onclick="sendChatMessage()" class="btn">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+
+</html>
