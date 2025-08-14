@@ -3,6 +3,7 @@ Region manager service for handling user regions and communication.
 """
 import time
 import json
+from datetime import datetime
 from typing import Dict, List, Set, Tuple, Optional
 from dataclasses import asdict
 from fastapi import WebSocket
@@ -11,6 +12,7 @@ from app.models import User, ChatMessage, MessageType
 from app.core.config import settings
 from app.services.canvas_service import CanvasService
 from app.services.user_service import UserService
+from app.services.auth_service import auth_service
 
 class RegionManager:
     """Service for managing regions and user interactions"""
@@ -29,11 +31,11 @@ class RegionManager:
     
     async def connect_user(self, websocket: WebSocket, user_id: str):
         """Connect a user and place them in the center region initially"""
-        await websocket.accept()
         center_region = (settings.REGIONS_PER_SIDE // 2, settings.REGIONS_PER_SIDE // 2)
         
         user = User(
             user_id=user_id,
+            username=user_id,  # Use user_id as username for WebSocket sessions
             websocket=websocket,
             current_region_x=center_region[0],
             current_region_y=center_region[1],
@@ -114,17 +116,22 @@ class RegionManager:
     
     async def place_pixel(self, user_id: str, x: int, y: int, color: str) -> bool:
         """Handle pixel placement with pixel bag system"""
-        user = self.user_service.get_user(user_id)
-        if not user:
+        # Work directly with database - no more session state
+        from app.services.auth_service import auth_service
+        authenticated_user = auth_service.get_user_by_username(user_id)
+        if not authenticated_user:
             return False
         
         current_time = time.time()
         
-        # Refill pixel bag based on time passed
-        self.user_service.refill_pixel_bag(user, current_time)
+        # Refill pixels based on time (database version)
+        auth_service.refill_user_pixels(user_id)
         
-        # Check if user has pixels in bag
-        if not self.user_service.can_place_pixel(user_id):
+        # Re-get user after refill
+        authenticated_user = auth_service.get_user_by_username(user_id)
+        
+        # Check if user has pixels in database
+        if authenticated_user.pixel_bag_size < 1:
             await self.send_to_user(user_id, {
                 "type": MessageType.ERROR.value,
                 "message": "No pixels available! Wait for bag to refill."
@@ -135,8 +142,15 @@ class RegionManager:
         if not self.canvas_service.place_pixel(x, y, color, user_id):
             return False
         
-        # Consume a pixel from bag
-        self.user_service.consume_pixel(user_id)
+        # Consume a pixel from database and update stats
+        authenticated_user.pixel_bag_size -= 1
+        authenticated_user.total_pixels_placed += 1
+        authenticated_user.last_pixel_placed_at = datetime.now()
+        
+        # Save to database immediately
+        auth_service._save_users()
+        
+        print(f"📊 User {user_id} placed a pixel! DB Bag: {authenticated_user.pixel_bag_size}/{authenticated_user.max_pixel_bag_size}")
         
         # Broadcast pixel update to all users in the region
         region_coords = self.canvas_service.get_region_coords(x, y)
@@ -175,10 +189,21 @@ class RegionManager:
         if len(region_chat) > settings.MAX_CHAT_HISTORY_PER_REGION:
             region_chat.pop(0)
         
+        # Get user data for enhanced chat display
+        authenticated_user = auth_service.get_user_by_username(user_id)
+        user_data = {
+            "username": user_id,
+            "level": authenticated_user.user_level if authenticated_user else 1,
+            "role": authenticated_user.role.value if authenticated_user else "USER",
+            "display_name": authenticated_user.display_name if authenticated_user else None,
+            "chat_color": authenticated_user.chat_color if authenticated_user else "#55aaff"
+        }
+        
         # Broadcast to region
         await self.broadcast_to_region(region_coords[0], region_coords[1], {
             "type": MessageType.CHAT_BROADCAST.value,
             "user_id": user_id,
+            "user_data": user_data,
             "message": message,
             "timestamp": chat_msg.timestamp
         })

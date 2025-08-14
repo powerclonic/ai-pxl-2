@@ -8,7 +8,82 @@
 </head>
 
 <body>
-    <div class="container">
+    <!-- Authentication Modal -->
+    <div class="auth-modal" id="authModal">
+        <div class="auth-modal-content">
+            <div class="auth-header">
+                <h2>Pixel Canvas - Login Required</h2>
+                <p>Please sign in to start placing pixels</p>
+            </div>
+            
+            <div class="auth-tabs">
+                <button class="auth-tab active" onclick="showLoginForm()">Login</button>
+                <button class="auth-tab" onclick="showRegisterForm()">Register</button>
+            </div>
+            
+            <!-- Login Form -->
+            <div class="auth-form" id="loginForm">
+                <form id="loginFormElement">
+                    <div class="form-group">
+                        <label for="loginUsername">Username:</label>
+                        <input type="text" id="loginUsername" name="username" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="loginPassword">Password:</label>
+                        <input type="password" id="loginPassword" name="password" required>
+                    </div>
+                    <div class="form-group captcha-group" id="loginCaptchaGroup" style="display: none;">
+                        <label for="loginCaptcha">Security Check:</label>
+                        <div class="captcha-question" id="loginCaptchaQuestion"></div>
+                        <input type="text" id="loginCaptcha" name="captcha_answer" placeholder="Enter answer">
+                    </div>
+                    <button type="submit" class="auth-submit">Login</button>
+                </form>
+            </div>
+            
+            <!-- Register Form -->
+            <div class="auth-form" id="registerForm" style="display: none;">
+                <form id="registerFormElement">
+                    <div class="form-group">
+                        <label for="registerUsername">Username:</label>
+                        <input type="text" id="registerUsername" name="username" required>
+                        <small>3-20 characters</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="registerPassword">Password:</label>
+                        <input type="password" id="registerPassword" name="password" required>
+                        <small>Minimum 6 characters</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="registerConfirmPassword">Confirm Password:</label>
+                        <input type="password" id="registerConfirmPassword" name="confirmPassword" required>
+                    </div>
+                    <button type="submit" class="auth-submit">Register</button>
+                </form>
+            </div>
+            
+            <div class="auth-error" id="authError"></div>
+            <div class="auth-loading" id="authLoading" style="display: none;">
+                <div class="loading-spinner"></div>
+                <span>Connecting...</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="container" id="mainContainer" style="display: none;">
+        <!-- User Info Bar -->
+        <div class="user-info-bar">
+            <div class="user-info">
+                <span class="user-icon">👤</span>
+                <span class="user-name" id="userName">Guest</span>
+                <span class="user-role" id="userRole"></span>
+            </div>
+            <div class="user-actions">
+                <button class="admin-panel-btn" id="adminPanelBtn" style="display: none;" onclick="openAdminPanel()">Admin Panel</button>
+                <button class="logout-btn" onclick="logout()">Logout</button>
+            </div>
+        </div>
+
         <div class="canvas-container">
             <div class="canvas-wrapper" id="canvasWrapper">
                 <canvas id="pixelCanvas" width="800" height="600"></canvas>
@@ -37,7 +112,7 @@
             <!-- Toggle Button - Always Visible -->
             <div class="color-palette-toggle" id="colorPaletteToggle" onclick="toggleColorPalette()">
                 <span class="palette-icon">🎨</span>
-                <span class="palette-text">0/10 pixels</span>
+                <span class="palette-text">Loading...</span>
             </div>
 
             <!-- Drawer Content - Only Visible When Expanded -->
@@ -74,6 +149,78 @@
                     <input type="text" id="chatInput" class="chat-input" placeholder="Type a message..."
                         maxlength="200">
                     <button onclick="sendChatMessage()" class="btn">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin Panel Modal -->
+    <div class="admin-modal" id="adminModal" style="display: none;">
+        <div class="admin-modal-content">
+            <div class="admin-header">
+                <h2>Admin Panel</h2>
+                <button class="close-btn" onclick="closeAdminPanel()">×</button>
+            </div>
+            
+            <div class="admin-tabs">
+                <button class="admin-tab active" onclick="showUsersTab()">Users</button>
+                <button class="admin-tab" onclick="showStatsTab()">Stats</button>
+            </div>
+            
+            <!-- Users Tab -->
+            <div class="admin-tab-content" id="usersTab">
+                <div class="users-controls">
+                    <button onclick="refreshUsers()" class="btn">Refresh Users</button>
+                    <input type="text" id="userSearchInput" placeholder="Search users..." onkeyup="filterUsers()">
+                </div>
+                
+                <div class="users-list" id="usersList">
+                    <div class="loading">Loading users...</div>
+                </div>
+                
+                <!-- Ban Modal -->
+                <div class="ban-modal" id="banModal" style="display: none;">
+                    <div class="ban-modal-content">
+                        <h3>Ban User</h3>
+                        <form id="banForm" onsubmit="handleBanUser(event)">
+                            <input type="hidden" id="banUsername" name="banUsername">
+                            <div class="form-group">
+                                <label>Reason:</label>
+                                <input type="text" id="banReason" name="banReason" placeholder="Reason for ban" required>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="banTemporary" name="banTemporary"> Temporary ban (24 hours)
+                                </label>
+                            </div>
+                            <div class="ban-actions">
+                                <button type="submit" class="btn btn-danger">Ban User</button>
+                                <button type="button" onclick="closeBanModal()" class="btn">Cancel</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Stats Tab -->
+            <div class="admin-tab-content" id="statsTab" style="display: none;">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <h3>Total Users</h3>
+                        <div class="stat-value" id="totalUsers">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Active Users</h3>
+                        <div class="stat-value" id="activeUsers">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Banned Users</h3>
+                        <div class="stat-value" id="bannedUsers">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Total Pixels Placed</h3>
+                        <div class="stat-value" id="totalPixels">-</div>
+                    </div>
                 </div>
             </div>
         </div>

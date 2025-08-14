@@ -1,9 +1,59 @@
 """
 Data models for the Pixel Canvas application.
 """
-from dataclasses import dataclass
-from typing import Dict, Set
+from dataclasses import dataclass, field
+from typing import Dict, Set, Optional
 from fastapi import WebSocket
+from app.core.config import settings
+from datetime import datetime
+from enum import Enum
+
+class UserRole(Enum):
+    """User role enumeration"""
+    USER = "USER"
+    ADMIN = "ADMIN"
+    BANNED = "BANNED"
+
+@dataclass
+class AuthenticatedUser:
+    """Represents an authenticated user with full authentication data"""
+    id: str
+    username: str
+    password_hash: str
+    role: UserRole = UserRole.USER
+    created_at: datetime = field(default_factory=datetime.now)
+    last_login: Optional[datetime] = None
+    is_banned: bool = False
+    ban_expires_at: Optional[datetime] = None
+    ban_reason: Optional[str] = None
+    failed_login_attempts: int = 0
+    
+    # User stats and metadata
+    pixel_bag_size: int = field(default_factory=lambda: settings.INITIAL_PIXEL_BAG)
+    max_pixel_bag_size: int = field(default_factory=lambda: settings.MAX_PIXEL_BAG)
+    total_pixels_placed: int = 0
+    total_messages_sent: int = 0
+    total_login_time_seconds: int = 0
+    last_pixel_placed_at: Optional[datetime] = None
+    last_message_sent_at: Optional[datetime] = None
+    user_level: int = 1
+    experience_points: int = 0
+    achievements: list = field(default_factory=list)
+    preferences: dict = field(default_factory=dict)
+    
+    # Chat customization
+    display_name: Optional[str] = None
+    chat_color: str = "#55aaff"
+
+@dataclass
+class CaptchaChallenge:
+    """CAPTCHA challenge for bot protection"""
+    challenge_id: str
+    user_id: str
+    question: str
+    answer: str
+    created_at: datetime
+    expires_at: datetime
 
 @dataclass
 class Pixel:
@@ -25,13 +75,19 @@ class ChatMessage:
 
 @dataclass
 class User:
-    """Represents a connected user"""
+    """Represents a connected user session"""
     user_id: str
+    username: str
     websocket: WebSocket
     current_region_x: int
     current_region_y: int
-    pixel_bag: int = 3
+    pixel_bag: int = settings.INITIAL_PIXEL_BAG
     last_bag_refill: float = 0
+    role: UserRole = UserRole.USER
+    is_authenticated: bool = False
+    last_action_time: float = field(default_factory=lambda: datetime.now().timestamp())
+    actions_per_minute: int = 0
+    actions_reset_time: float = field(default_factory=lambda: datetime.now().timestamp())
 
 @dataclass
 class RegionInfo:

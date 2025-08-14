@@ -8,12 +8,13 @@ from fastapi.templating import Jinja2Templates
 from app.core.config import settings
 from app.services import RegionManager
 from app.api import create_api_router, websocket_endpoint
+from app.api.auth import router as auth_router
 
 def create_app() -> FastAPI:
     """Create and configure FastAPI application"""
     app = FastAPI(
         title="Pixel Canvas",
-        description="A collaborative pixel canvas application",
+        description="A collaborative pixel canvas application with authentication",
         version="2.0.0"
     )
     
@@ -23,6 +24,9 @@ def create_app() -> FastAPI:
     
     # Create global region manager
     region_manager = RegionManager()
+    
+    # Add authentication routes
+    app.include_router(auth_router)
     
     # Add API routes
     api_router = create_api_router(region_manager)
