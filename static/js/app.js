@@ -9,6 +9,7 @@ let userId = 'user_' + Math.random().toString(36).substr(2, 9);
 let authToken = null;
 let currentUser = null;
 let isAuthenticated = false;
+let currentUsername = null;
 
 // Camera and viewport
 let zoom = 1;
@@ -48,6 +49,14 @@ const CHAT_COOLDOWN = 3000; // 3 seconds between messages
 // Region loading throttling
 let lastRegionUpdateTime = 0;
 const REGION_UPDATE_THROTTLE = 100; // milliseconds between region updates
+
+// Bulk placement system
+let isBulkMode = false;
+let bulkPlacing = false;
+let lastBulkPixelTime = 0;
+const BULK_PLACEMENT_DELAY = 10; // milliseconds between bulk pixels
+let bulkPlacementPath = new Set(); // Track pixels already placed in current bulk session
+let bulkPreviewPixels = new Map(); // Store preview pixels {x,y} -> color
 
 // Configuration - will be loaded from server
 let CONFIG = {
@@ -409,14 +418,18 @@ function updateVisibleRegions() {
         console.log(`🆕 Loaded ${newRegionsLoaded} new regions`);
     }
 
-    // Update current region for chat/user management
+    // Update current region for chat/user management and broadcast all visible regions
     const currentRegionX = Math.floor(cameraX / CONFIG.REGION_SIZE);
     const currentRegionY = Math.floor(cameraY / CONFIG.REGION_SIZE);
     updateCurrentRegion(currentRegionX, currentRegionY);
+    
+    // Also send all visible regions to backend for multi-region pixel broadcasting
+    updateVisibleRegionsBackend();
 }
 
 let lastRegionX = -1;
 let lastRegionY = -1;
+let lastVisibleRegionsHash = '';
 
 function updateCurrentRegion(regionX, regionY) {
     if (regionX !== lastRegionX || regionY !== lastRegionY) {
@@ -430,6 +443,50 @@ function updateCurrentRegion(regionX, regionY) {
                 region_y: regionY
             }));
         }
+    }
+}
+
+function updateVisibleRegionsBackend() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+    }
+    
+    // Calculate view dimensions based on current zoom
+    const viewWidth = canvas.width / zoom;
+    const viewHeight = canvas.height / zoom;
+
+    // Calculate the viewport bounds in world coordinates
+    const leftX = cameraX - viewWidth / 2;
+    const rightX = cameraX + viewWidth / 2;
+    const topY = cameraY - viewHeight / 2;
+    const bottomY = cameraY + viewHeight / 2;
+
+    // Calculate region bounds (same logic as updateVisibleRegions but for backend)
+    const startRegionX = Math.max(0, Math.floor(leftX / CONFIG.REGION_SIZE));
+    const endRegionX = Math.min(CONFIG.CANVAS_SIZE / CONFIG.REGION_SIZE - 1, Math.floor(rightX / CONFIG.REGION_SIZE));
+    const startRegionY = Math.max(0, Math.floor(topY / CONFIG.REGION_SIZE));
+    const endRegionY = Math.min(CONFIG.CANVAS_SIZE / CONFIG.REGION_SIZE - 1, Math.floor(bottomY / CONFIG.REGION_SIZE));
+
+    // Collect all visible regions
+    const visibleRegions = [];
+    for (let x = startRegionX; x <= endRegionX; x++) {
+        for (let y = startRegionY; y <= endRegionY; y++) {
+            visibleRegions.push({ x: x, y: y });
+        }
+    }
+    
+    // Create a hash to avoid sending the same data repeatedly
+    const regionsHash = visibleRegions.map(r => `${r.x},${r.y}`).sort().join('|');
+    
+    if (regionsHash !== lastVisibleRegionsHash) {
+        lastVisibleRegionsHash = regionsHash;
+        
+        console.log(`📡 Sending ${visibleRegions.length} visible regions to backend:`, visibleRegions);
+        
+        ws.send(JSON.stringify({
+            type: 'viewport_regions',
+            regions: visibleRegions
+        }));
     }
 }
 
@@ -573,6 +630,47 @@ window.debugRegions = function() {
 // Make force load function available globally too
 window.forceLoadAllVisibleRegions = forceLoadAllVisibleRegions;
 
+// Test functions for bulk mode
+window.testBulkMode = function() {
+    console.log('🧪 Testing bulk mode activation...');
+    isBulkMode = true;
+    bulkPlacementPath.clear();
+    console.log('🚀 BULK MODE ACTIVATED (manually)');
+    
+    // Visual feedback
+    document.body.style.cursor = 'crosshair';
+    const bulkIndicator = document.createElement('div');
+    bulkIndicator.id = 'bulkIndicator';
+    bulkIndicator.innerHTML = '🚀 BULK MODE - MANUAL TEST';
+    bulkIndicator.style.cssText = `
+        position: fixed;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(255, 0, 0, 0.8);
+        color: white;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-weight: bold;
+        font-size: 14px;
+        z-index: 1000;
+        pointer-events: none;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+    `;
+    document.body.appendChild(bulkIndicator);
+};
+
+window.testKeyListeners = function() {
+    console.log('🧪 Testing key listeners...');
+    document.addEventListener('keydown', function(e) {
+        console.log('🔍 DEBUG: Keydown detected:', e.code, e.key);
+    });
+    document.addEventListener('keyup', function(e) {
+        console.log('🔍 DEBUG: Keyup detected:', e.code, e.key);
+    });
+    console.log('✅ Debug key listeners added');
+};
+
 function renderCanvas() {
     if (!canvas || !ctx) {
         return; // Don't render if canvas is not available
@@ -629,6 +727,59 @@ function renderCanvas() {
             ctx.fillStyle = pixel.color;
             ctx.fillRect(screenX, screenY, zoom, zoom);
         }
+    }
+
+    // Draw preview pixels (bulk mode)
+    if (isBulkMode && bulkPreviewPixels.size > 0) {
+        for (const [pixelKey, color] of bulkPreviewPixels.entries()) {
+            const [x, y] = pixelKey.split(',').map(Number);
+
+            // Check if preview pixel is in viewport
+            if (x >= leftX && x < leftX + viewWidth &&
+                y >= topY && y < topY + viewHeight) {
+
+                const screenX = (x - leftX) * zoom;
+                const screenY = (y - topY) * zoom;
+
+                // Calculate pulse effect based on time
+                const time = Date.now() * 0.003;
+                const pulse = 0.1 + 0.1 * Math.sin(time + x * 0.1 + y * 0.1);
+                
+                // Draw preview pixel with animated effect
+                ctx.fillStyle = color;
+                ctx.globalAlpha = 0.6 + pulse; // Pulsing transparency
+                ctx.fillRect(screenX, screenY, zoom, zoom);
+                
+                // Add animated glowing border effect
+                ctx.globalAlpha = 0.8 + pulse * 0.5;
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = Math.max(1, zoom * 0.1) + pulse;
+                ctx.strokeRect(screenX - pulse, screenY - pulse, zoom + pulse * 2, zoom + pulse * 2);
+                
+                // Add inner highlight with shimmer
+                ctx.globalAlpha = 0.9;
+                ctx.strokeStyle = color;
+                ctx.lineWidth = Math.max(0.5, zoom * 0.05);
+                ctx.strokeRect(screenX + 1, screenY + 1, zoom - 2, zoom - 2);
+                
+                // Add sparkle effect for high zoom
+                if (zoom > 4) {
+                    const sparkle = Math.sin(time * 2 + x * 0.5 + y * 0.5);
+                    if (sparkle > 0.7) {
+                        ctx.fillStyle = '#ffffff';
+                        ctx.globalAlpha = sparkle - 0.5;
+                        const sparkleSize = 2;
+                        ctx.fillRect(
+                            screenX + zoom/2 - sparkleSize/2, 
+                            screenY + zoom/2 - sparkleSize/2, 
+                            sparkleSize, 
+                            sparkleSize
+                        );
+                    }
+                }
+            }
+        }
+        ctx.globalAlpha = 1; // Reset alpha
     }
 }
 
@@ -694,12 +845,54 @@ function handleMessage(data) {
         case 'pixel_update':
             console.log('DEBUG: Processing pixel_update:', data);
             updatePixel(data.x, data.y, data.color);
+            
+            // Track pixel placement for achievements (only if it's the current user)
+            if (data.user_id === currentUsername) {
+                pixelsPlacedCount++;
+            }
             break;
         case 'pixel_bag_update':
             console.log('📦 Received pixel bag update:', data);
             pixelBag = data.pixel_bag_size;
             maxPixelBag = data.max_pixel_bag_size;
             updatePixelBagDisplay();
+            break;
+        case 'bulk_complete':
+            console.log(`🚀 Bulk placement complete: ${data.placed}/${data.requested} pixels placed (available at start: ${data.available_at_start})`);
+            
+            // Track bulk placement for achievements
+            if (data.placed > 0) {
+                bulkPlacementsCount++;
+                pixelsPlacedCount += data.placed; // Add the placed pixels to total count
+            }
+            
+            // Create success animation with detailed stats
+            createBulkSuccessAnimation(data.placed, data.requested);
+            
+            // Update bulk indicator with final results
+            if (bulkIndicator && isBulkMode) {
+                if (data.placed < data.requested) {
+                    bulkIndicator.innerHTML = `
+                        <span style="color: #ffa726;">⚠️ Placed ${data.placed}/${data.requested} pixels • Bag limit reached</span>
+                    `;
+                } else {
+                    bulkIndicator.innerHTML = `
+                        <span style="color: #4caf50;">✅ Placed all ${data.placed} pixels!</span>
+                    `;
+                }
+            }
+            
+            if (data.placed < data.requested) {
+                addSystemMessage(`⚠️ Bulk placement: ${data.placed}/${data.requested} pixels placed (pixel bag limit)`);
+            } else {
+                addSystemMessage(`✅ Successfully placed ${data.placed} pixels`);
+            }
+            
+            // Clear preview pixels after showing results
+            setTimeout(() => {
+                bulkPreviewPixels.clear();
+                renderCanvas();
+            }, 1500);
             break;
         case 'chat_broadcast':
             addChatMessage(data.user_id, data.message, data.timestamp, data.user_data);
@@ -834,6 +1027,11 @@ function setupEventListeners() {
         }
     });
 
+    // Bulk placement with Space key
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keyup', handleKeyUp);
+    console.log('✅ Keyboard event listeners attached (keydown, keyup)');
+
     // Note: Keyboard navigation removed as requested
 
     // Start ping interval
@@ -921,7 +1119,11 @@ function handleCanvasClick(event) {
         
         // Wait a tiny bit for region to load, then place pixel
         setTimeout(() => {
-            placePixel(worldX, worldY, selectedColor);
+            if (isBulkMode) {
+                placePixelBulk(worldX, worldY, selectedColor);
+            } else {
+                placePixel(worldX, worldY, selectedColor);
+            }
         }, 50); // Small delay to ensure region is loaded
     }
 }
@@ -998,8 +1200,19 @@ function handleMouseMove(event) {
         if (totalDragDistance > dragThreshold) {
             if (!isDragging) {
                 console.log('🖱️ Starting drag');
+                // If in bulk mode, start bulk placing
+                if (isBulkMode) {
+                    bulkPlacing = true;
+                    console.log('🚀 Starting BULK DRAG placement');
+                }
             }
             isDragging = true;
+            
+            // If in bulk mode and dragging, place pixels along the path
+            if (isBulkMode && bulkPlacing) {
+                ensureRegionLoadedForPosition(mouseWorldX, mouseWorldY);
+                placePixelBulk(mouseWorldX, mouseWorldY, selectedColor);
+            }
             
             // Calculate where the anchor point should be now based on current mouse position
             const viewWidth = canvas.width / zoom;
@@ -1007,13 +1220,16 @@ function handleMouseMove(event) {
             const targetWorldX = cameraX - viewWidth / 2 + currentMouseX / zoom;
             const targetWorldY = cameraY - viewHeight / 2 + currentMouseY / zoom;
             
-            // Adjust camera so that the anchor point stays under the mouse
-            cameraX += dragStartX - targetWorldX;
-            cameraY += dragStartY - targetWorldY;
-            
-            // Apply bounds checking
-            adjustCameraBounds();
-            updateVisibleRegions();
+            // Only move camera if NOT in bulk mode (bulk mode = painting, not panning)
+            if (!isBulkMode) {
+                // Adjust camera so that the anchor point stays under the mouse
+                cameraX += dragStartX - targetWorldX;
+                cameraY += dragStartY - targetWorldY;
+                
+                // Apply bounds checking
+                adjustCameraBounds();
+                updateVisibleRegions();
+            }
         }
     }
 }
@@ -1149,6 +1365,12 @@ function handleMouseUp(event) {
         wasDragging = true; // Set flag to ignore the upcoming click event
         lastDragEndTime = Date.now(); // Set timestamp
         
+        // If we were bulk placing, log completion
+        if (bulkPlacing) {
+            console.log(`🚀 BULK DRAG completed - placed ${bulkPlacementPath.size} pixels`);
+            bulkPlacing = false;
+        }
+        
         // Force immediate region update after drag (bypass throttling)
         lastRegionUpdateTime = 0; // Reset throttle
         updateVisibleRegions(); // Ensure all visible regions are loaded
@@ -1242,6 +1464,272 @@ function placePixel(x, y, color) {
     }
 }
 
+function handleKeyDown(event) {
+    console.log('🔑 Key down event fired:', event.code, 'key:', event.key);
+    // Only activate bulk mode if not typing in chat
+    const chatInput = document.getElementById('chatInput');
+    if (document.activeElement === chatInput) {
+        console.log('🚫 Ignoring key - typing in chat');
+        return; // Don't interfere with chat typing
+    }
+
+    if (event.code === 'Space' && !isBulkMode) {
+        event.preventDefault(); // Prevent page scroll
+        isBulkMode = true;
+        bulkPlacementPath.clear(); // Clear previous session
+        bulkPreviewPixels.clear(); // Clear preview pixels
+        console.log('🚀 BULK MODE ACTIVATED - Preview mode with batch placement on release');
+        
+        // Visual feedback with animation
+        document.body.style.cursor = 'crosshair';
+        const bulkIndicator = document.createElement('div');
+        bulkIndicator.id = 'bulkIndicator';
+        bulkIndicator.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 16px; animation: bounce 0.6s ease-in-out;">🎨</span>
+                <div>
+                    <div style="font-weight: bold;">BULK PAINT MODE</div>
+                    <div style="font-size: 11px; opacity: 0.9;">Preview • Release Space to place</div>
+                </div>
+                <span id="bulkCounter" style="background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 10px; font-size: 12px; transition: all 0.3s ease;">0</span>
+            </div>
+        `;
+        bulkIndicator.style.cssText = `
+            position: fixed;
+            top: 15px;
+            left: 50%;
+            transform: translateX(-50%) translateY(-20px);
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px 20px;
+            border-radius: 25px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-size: 13px;
+            z-index: 1000;
+            pointer-events: none;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+            opacity: 0;
+            animation: slideInBounce 0.5s ease-out forwards;
+        `;
+        document.body.appendChild(bulkIndicator);
+        
+        // Add CSS animations if not already present
+        if (!document.getElementById('bulkAnimations')) {
+            const styleSheet = document.createElement('style');
+            styleSheet.id = 'bulkAnimations';
+            styleSheet.textContent = `
+                @keyframes slideInBounce {
+                    0% {
+                        opacity: 0;
+                        transform: translateX(-50%) translateY(-40px) scale(0.8);
+                    }
+                    50% {
+                        opacity: 1;
+                        transform: translateX(-50%) translateY(5px) scale(1.05);
+                    }
+                    100% {
+                        opacity: 1;
+                        transform: translateX(-50%) translateY(0px) scale(1);
+                    }
+                }
+                
+                @keyframes bounce {
+                    0%, 20%, 50%, 80%, 100% {
+                        transform: translateY(0);
+                    }
+                    40% {
+                        transform: translateY(-8px);
+                    }
+                    60% {
+                        transform: translateY(-4px);
+                    }
+                }
+                
+                @keyframes slideOutUp {
+                    0% {
+                        opacity: 1;
+                        transform: translateX(-50%) translateY(0px) scale(1);
+                    }
+                    100% {
+                        opacity: 0;
+                        transform: translateX(-50%) translateY(-40px) scale(0.9);
+                    }
+                }
+                
+                @keyframes counterPulse {
+                    0% { transform: scale(1); }
+                    50% { transform: scale(1.2); background: rgba(255,255,255,0.4); }
+                    100% { transform: scale(1); }
+                }
+                
+                @keyframes processingGlow {
+                    0% { 
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+                    }
+                    50% { 
+                        background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+                        box-shadow: 0 4px 30px rgba(79, 172, 254, 0.5);
+                    }
+                    100% { 
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+                    }
+                }
+            `;
+            document.head.appendChild(styleSheet);
+        }
+        document.body.appendChild(bulkIndicator);
+    }
+}
+
+function handleKeyUp(event) {
+    console.log('🔑 Key up event fired:', event.code, 'key:', event.key);
+    if (event.code === 'Space' && isBulkMode) {
+        const previewCount = bulkPreviewPixels.size;
+        console.log(`🚀 BULK PLACEMENT: Processing ${previewCount} pixels...`);
+        
+        const bulkIndicator = document.getElementById('bulkIndicator');
+        
+        // If there are pixels to process, show processing animation
+        if (previewCount > 0) {
+            // Update indicator to show processing state
+            if (bulkIndicator) {
+                bulkIndicator.innerHTML = `
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 16px; animation: bounce 1s infinite;">⚡</span>
+                        <div>
+                            <div style="font-weight: bold;">PROCESSING...</div>
+                            <div style="font-size: 11px; opacity: 0.9;">Placing ${previewCount} pixels</div>
+                        </div>
+                        <span style="background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 10px; font-size: 12px;">${previewCount}</span>
+                    </div>
+                `;
+                bulkIndicator.style.animation = 'processingGlow 1s ease-in-out infinite';
+            }
+        }
+        
+        // Send all preview pixels to server in batch
+        if (previewCount > 0 && ws && ws.readyState === WebSocket.OPEN) {
+            const pixelsArray = Array.from(bulkPreviewPixels.entries()).map(([key, color]) => {
+                const [x, y] = key.split(',').map(Number);
+                return { x, y, color };
+            });
+            
+            // Send bulk placement request
+            ws.send(JSON.stringify({
+                type: 'bulk_pixel_place',
+                pixels: pixelsArray
+            }));
+            
+            console.log(`📦 BULK: Sent ${pixelsArray.length} pixels to server`);
+        }
+        
+        // Deactivate bulk mode with exit animation
+        setTimeout(() => {
+            if (bulkIndicator) {
+                bulkIndicator.style.animation = 'slideOutUp 0.4s ease-in forwards';
+                setTimeout(() => {
+                    if (bulkIndicator && bulkIndicator.parentNode) {
+                        bulkIndicator.remove();
+                    }
+                }, 400);
+            }
+            
+            isBulkMode = false;
+            bulkPlacing = false;
+            bulkPlacementPath.clear();
+            bulkPreviewPixels.clear();
+            console.log('🛑 BULK MODE DEACTIVATED');
+            
+            // Remove visual feedback
+            document.body.style.cursor = '';
+            
+            // Force re-render to remove preview pixels
+            renderCanvas();
+        }, previewCount > 0 ? 1500 : 100); // Longer delay if processing pixels
+    }
+}
+
+function placePixelBulk(x, y, color) {
+    // Check throttling for bulk placement
+    const now = Date.now();
+    if (now - lastBulkPixelTime < BULK_PLACEMENT_DELAY) {
+        return; // Too soon since last bulk pixel
+    }
+    
+    // Check if this pixel was already placed in current bulk session
+    const pixelKey = `${x},${y}`;
+    if (bulkPlacementPath.has(pixelKey)) {
+        return; // Already placed this pixel in current bulk session
+    }
+    
+    // Add to preview (validation will be done on server when sending)
+    lastBulkPixelTime = now;
+    bulkPlacementPath.add(pixelKey);
+    bulkPreviewPixels.set(pixelKey, color);
+    
+    console.log(`🎨 PREVIEW: Adding pixel at ${x},${y} (${bulkPreviewPixels.size} total preview)`);
+    
+    // Update bulk indicator with count and animation
+    const bulkCounter = document.getElementById('bulkCounter');
+    if (bulkCounter) {
+        // Show preview count vs available pixels
+        const availablePixels = pixelBag;
+        const previewCount = bulkPreviewPixels.size;
+        
+        bulkCounter.textContent = `${previewCount}`;
+        
+        // Change color based on availability
+        if (previewCount > availablePixels) {
+            bulkCounter.style.background = 'rgba(239, 68, 68, 0.8)'; // Red if over limit
+            bulkCounter.style.color = 'white';
+        } else if (previewCount === availablePixels) {
+            bulkCounter.style.background = 'rgba(245, 158, 11, 0.8)'; // Orange if at limit
+            bulkCounter.style.color = 'white';
+        } else {
+            bulkCounter.style.background = 'rgba(255,255,255,0.2)'; // Normal
+            bulkCounter.style.color = 'white';
+        }
+        
+        // Add pulse animation
+        bulkCounter.style.animation = 'counterPulse 0.3s ease-out';
+        setTimeout(() => {
+            bulkCounter.style.animation = '';
+        }, 300);
+    }
+    
+    // Update the main indicator with pixel availability info
+    const bulkIndicator = document.getElementById('bulkIndicator');
+    if (bulkIndicator && isBulkMode) {
+        const availablePixels = pixelBag;
+        const previewCount = bulkPreviewPixels.size;
+        let statusText = 'Preview • Release Space to place';
+        
+        if (previewCount > availablePixels) {
+            statusText = `⚠️ ${previewCount - availablePixels} over limit • Will place ${availablePixels}`;
+        } else if (previewCount === availablePixels) {
+            statusText = '✅ Using all available pixels';
+        }
+        
+        bulkIndicator.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 16px; animation: bounce 0.6s ease-in-out;">🎨</span>
+                <div>
+                    <div style="font-weight: bold;">BULK PAINT MODE</div>
+                    <div style="font-size: 11px; opacity: 0.9;">${statusText}</div>
+                </div>
+                <span id="bulkCounter" style="background: ${bulkCounter ? bulkCounter.style.background : 'rgba(255,255,255,0.2)'}; padding: 2px 6px; border-radius: 10px; font-size: 12px; transition: all 0.3s ease;">${previewCount}</span>
+            </div>
+        `;
+    }
+    
+    // Force re-render to show preview pixel
+    renderCanvas();
+}
+
 function sendChatMessage() {
     const input = document.getElementById('chatInput');
     const message = input.value.trim();
@@ -1263,6 +1751,9 @@ function sendChatMessage() {
         }));
         input.value = '';
         lastChatTime = now;
+        
+        // Track chat message for achievements
+        chatMessagesCount++;
     }
 }
 
@@ -1395,6 +1886,7 @@ async function handleLogin(event) {
         if (result.success && result.user) {
             // Authentication successful via cookies
             currentUser = result.user;
+            currentUsername = result.user.username; // Add this for profile system
             isAuthenticated = true;
             
             // Update pixel bag from user data
@@ -1479,6 +1971,7 @@ async function handleRegister(event) {
         if (result.success && result.user) {
             // Registration and auto-login successful via cookies
             currentUser = result.user;
+            currentUsername = result.user.username; // Add this for profile system
             isAuthenticated = true;
             
             // Update pixel bag from user data
@@ -1528,12 +2021,19 @@ function showCaptchaChallenge(question, formType) {
 
 function updateUserInterface() {
     if (currentUser) {
-        document.getElementById('userName').textContent = currentUser.username;
-        document.getElementById('userRole').textContent = currentUser.role;
+        // Update any existing user displays
+        const userNameElement = document.getElementById('userName');
+        const userRoleElement = document.getElementById('userRole');
+        
+        if (userNameElement) userNameElement.textContent = currentUser.username;
+        if (userRoleElement) userRoleElement.textContent = currentUser.role;
         
         // Show admin panel if user is admin
         if (currentUser.role === 'ADMIN') {
-            document.getElementById('adminPanelBtn').style.display = 'inline-block';
+            const adminPanelBtn = document.getElementById('adminPanelBtn');
+            const adminNavBtn = document.getElementById('adminNavBtn');
+            if (adminPanelBtn) adminPanelBtn.style.display = 'inline-block';
+            if (adminNavBtn) adminNavBtn.style.display = 'block';
         }
     }
 }
@@ -1919,6 +2419,257 @@ async function updateUserData(username, field, value) {
         console.error('Error updating user data:', error);
     }
 }
+
+function createBulkSuccessAnimation(placed, total) {
+    // Create confetti animation for successful bulk placement
+    const confettiContainer = document.createElement('div');
+    confettiContainer.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        pointer-events: none;
+        z-index: 9999;
+    `;
+    document.body.appendChild(confettiContainer);
+    
+    // Create success notification
+    const successNotification = document.createElement('div');
+    successNotification.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 12px;">
+            <span style="font-size: 24px; animation: bounce 0.6s ease-in-out;">🎉</span>
+            <div>
+                <div style="font-weight: bold; font-size: 16px;">BULK COMPLETE!</div>
+                <div style="font-size: 12px; opacity: 0.9;">${placed}/${total} pixels placed</div>
+            </div>
+            <span style="font-size: 20px; animation: bounce 0.6s ease-in-out 0.2s;">✨</span>
+        </div>
+    `;
+    successNotification.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%) scale(0);
+        background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
+        color: white;
+        padding: 20px 30px;
+        border-radius: 30px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        font-size: 14px;
+        z-index: 10000;
+        pointer-events: none;
+        box-shadow: 0 8px 32px rgba(34, 197, 94, 0.4);
+        backdrop-filter: blur(10px);
+        border: 2px solid rgba(255,255,255,0.3);
+        animation: successPop 2s ease-out forwards;
+    `;
+    document.body.appendChild(successNotification);
+    
+    // Add success animation styles
+    if (!document.getElementById('successAnimations')) {
+        const styleSheet = document.createElement('style');
+        styleSheet.id = 'successAnimations';
+        styleSheet.textContent = `
+            @keyframes successPop {
+                0% {
+                    opacity: 0;
+                    transform: translate(-50%, -50%) scale(0);
+                }
+                20% {
+                    opacity: 1;
+                    transform: translate(-50%, -50%) scale(1.1);
+                }
+                100% {
+                    opacity: 0;
+                    transform: translate(-50%, -50%) scale(0.8);
+                }
+            }
+            
+            @keyframes confettiFall {
+                0% {
+                    opacity: 1;
+                    transform: translateY(-100vh) rotate(0deg);
+                }
+                100% {
+                    opacity: 0;
+                    transform: translateY(100vh) rotate(720deg);
+                }
+            }
+        `;
+        document.head.appendChild(styleSheet);
+    }
+    
+    // Create confetti particles
+    const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#ffa726', '#ab47bc'];
+    for (let i = 0; i < (placed > 10 ? 30 : 15); i++) {
+        const confetti = document.createElement('div');
+        confetti.style.cssText = `
+            position: absolute;
+            width: ${Math.random() * 8 + 4}px;
+            height: ${Math.random() * 8 + 4}px;
+            background: ${colors[Math.floor(Math.random() * colors.length)]};
+            left: ${Math.random() * 100}vw;
+            animation: confettiFall ${Math.random() * 2 + 2}s linear forwards;
+            animation-delay: ${Math.random() * 0.5}s;
+            border-radius: ${Math.random() > 0.5 ? '50%' : '0'};
+        `;
+        confettiContainer.appendChild(confetti);
+    }
+    
+    // Clean up after animation
+    setTimeout(() => {
+        if (confettiContainer.parentNode) {
+            confettiContainer.remove();
+        }
+        if (successNotification.parentNode) {
+            successNotification.remove();
+        }
+    }, 4000);
+}
+
+// ==================== TUTORIAL SYSTEM ====================
+let currentTutorialStep = 1;
+
+function showTutorial() {
+    const tutorialModal = document.getElementById('tutorialModal');
+    tutorialModal.classList.add('show');
+    currentTutorialStep = 1;
+    updateTutorialStep();
+}
+
+function closeTutorial() {
+    const tutorialModal = document.getElementById('tutorialModal');
+    const dontShowAgain = document.getElementById('dontShowAgain').checked;
+    
+    tutorialModal.classList.remove('show');
+    
+    if (dontShowAgain) {
+        localStorage.setItem('pixelplace_tutorial_dismissed', 'true');
+    }
+}
+
+function nextStep() {
+    if (currentTutorialStep < 5) {
+        currentTutorialStep++;
+        updateTutorialStep();
+    } else {
+        closeTutorial();
+    }
+}
+
+function previousStep() {
+    if (currentTutorialStep > 1) {
+        currentTutorialStep--;
+        updateTutorialStep();
+    }
+}
+
+function goToStep(step) {
+    currentTutorialStep = step;
+    updateTutorialStep();
+}
+
+function updateTutorialStep() {
+    // Hide all steps
+    document.querySelectorAll('.tutorial-step').forEach(step => {
+        step.classList.remove('active');
+    });
+    
+    // Show current step
+    document.getElementById(`step${currentTutorialStep}`).classList.add('active');
+    
+    // Update dots
+    document.querySelectorAll('.dot').forEach((dot, index) => {
+        dot.classList.toggle('active', index + 1 === currentTutorialStep);
+    });
+    
+    // Update navigation buttons
+    document.getElementById('prevBtn').disabled = currentTutorialStep === 1;
+    document.getElementById('nextBtn').textContent = currentTutorialStep === 5 ? 'Finish' : 'Next';
+}
+
+// ==================== PROFILE SYSTEM ====================
+function openProfile() {
+    const profileModal = document.getElementById('profileModal');
+    profileModal.classList.add('show');
+    loadProfileData();
+}
+
+function closeProfile() {
+    const profileModal = document.getElementById('profileModal');
+    profileModal.classList.remove('show');
+}
+
+function loadProfileData() {
+    // Update profile info with current user data
+    if (currentUsername) {
+        document.getElementById('profileUsername').textContent = currentUsername;
+        
+        // Calculate level based on pixels placed (example)
+        const level = Math.floor(pixelsPlacedCount / 10) + 1;
+        document.getElementById('profileLevel').textContent = `Level ${level}`;
+        
+        // Update stats
+        document.getElementById('statPixelsPlaced').textContent = pixelsPlacedCount || 0;
+        document.getElementById('statPixelBag').textContent = `${pixelBag}/${maxPixelBag}`;
+        
+        // Calculate time active (example - you'd track this properly)
+        const timeActive = Math.floor((Date.now() - sessionStartTime) / 60000); // minutes
+        document.getElementById('statTimeActive').textContent = timeActive < 60 ? 
+            `${timeActive}m` : `${Math.floor(timeActive / 60)}h ${timeActive % 60}m`;
+        
+        // Join date (you'd get this from server)
+        document.getElementById('statJoinDate').textContent = 'Today';
+        
+        // Update achievements
+        updateAchievements();
+    }
+}
+
+function updateAchievements() {
+    const achievements = document.querySelectorAll('.achievement');
+    
+    // First Pixel achievement
+    if (pixelsPlacedCount > 0) {
+        achievements[0].classList.remove('locked');
+        achievements[0].classList.add('unlocked');
+    }
+    
+    // On Fire achievement (100 pixels)
+    if (pixelsPlacedCount >= 100) {
+        achievements[1].classList.remove('locked');
+        achievements[1].classList.add('unlocked');
+    }
+    
+    // Bulk Master achievement (you'd track this)
+    if (bulkPlacementsCount >= 10) {
+        achievements[2].classList.remove('locked');
+        achievements[2].classList.add('unlocked');
+    }
+    
+    // Social Artist achievement (you'd track this)
+    if (chatMessagesCount >= 50) {
+        achievements[3].classList.remove('locked');
+        achievements[3].classList.add('unlocked');
+    }
+}
+
+// Track statistics for achievements
+let pixelsPlacedCount = 0;
+let bulkPlacementsCount = 0;
+let chatMessagesCount = 0;
+let sessionStartTime = Date.now();
+
+// Show tutorial on first visit
+window.addEventListener('load', () => {
+    setTimeout(() => {
+        const tutorialDismissed = localStorage.getItem('pixelplace_tutorial_dismissed');
+        if (!tutorialDismissed) {
+            showTutorial();
+        }
+    }, 2000); // Show after 2 seconds to let everything load
+});
 
 // Initialize the application when DOM is ready
 init();

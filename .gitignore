@@ -1,4 +1,5 @@
 **/__*
 .*
-**/.json
+**/*.json
+**/*.parquet
 !.gitignore

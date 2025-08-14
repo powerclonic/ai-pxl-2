@@ -4,3 +4,5 @@ websockets>=12.0
 jinja2
 PyJWT>=2.8.0
 python-multipart
+pandas>=2.0.0
+pyarrow>=14.0.0

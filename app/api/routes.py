@@ -61,6 +61,34 @@ def create_api_router(region_manager: RegionManager) -> APIRouter:
         """Get current statistics (requires authentication)"""
         return region_manager.get_stats()
     
+    @router.get("/persistence-stats")
+    async def get_persistence_stats(current_user: AuthenticatedUser = Depends(get_current_user)):
+        """Get persistence system statistics (requires authentication)"""
+        if not current_user.is_admin():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin access required"
+            )
+        return await region_manager.canvas_service.get_persistence_stats()
+    
+    @router.post("/manual-save")
+    async def manual_save(current_user: AuthenticatedUser = Depends(get_current_user)):
+        """Trigger manual canvas save (admin only)"""
+        if not current_user.is_admin():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin access required"
+            )
+        
+        try:
+            await region_manager.canvas_service.save_snapshot()
+            return {"success": True, "message": "Canvas saved successfully"}
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Save failed: {str(e)}"
+            )
+    
     @router.get("/health")
     async def health_check():
         """Health check endpoint (public)"""

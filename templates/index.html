@@ -70,18 +70,33 @@
         </div>
     </div>
 
-    <div class="container" id="mainContainer" style="display: none;">
-        <!-- User Info Bar -->
-        <div class="user-info-bar">
-            <div class="user-info">
-                <span class="user-icon">👤</span>
-                <span class="user-name" id="userName">Guest</span>
-                <span class="user-role" id="userRole"></span>
+        <div class="main-container" id="mainContainer" style="display: none;">
+        <!-- Floating Logo -->
+        <div class="floating-logo">
+            <div class="logo-content">
+                <span class="logo-icon">🎨</span>
+                <span class="logo-text">PixelPlace</span>
             </div>
-            <div class="user-actions">
-                <button class="admin-panel-btn" id="adminPanelBtn" style="display: none;" onclick="openAdminPanel()">Admin Panel</button>
-                <button class="logout-btn" onclick="logout()">Logout</button>
-            </div>
+        </div>
+
+        <!-- Floating Navigation Buttons -->
+        <div class="floating-nav">
+            <button class="nav-btn profile-btn" onclick="openProfile()" title="Profile">
+                <span class="nav-icon">👤</span>
+                <span class="nav-label">Profile</span>
+            </button>
+            <button class="nav-btn tutorial-btn" onclick="showTutorial()" title="Tutorial">
+                <span class="nav-icon">❓</span>
+                <span class="nav-label">Help</span>
+            </button>
+            <button class="nav-btn admin-btn" id="adminNavBtn" style="display: none;" onclick="openAdminPanel()" title="Admin">
+                <span class="nav-icon">⚙️</span>
+                <span class="nav-label">Admin</span>
+            </button>
+            <button class="nav-btn logout-btn" onclick="logout()" title="Logout">
+                <span class="nav-icon">🚪</span>
+                <span class="nav-label">Logout</span>
+            </button>
         </div>
 
         <div class="canvas-container">
@@ -149,6 +164,150 @@
                     <input type="text" id="chatInput" class="chat-input" placeholder="Type a message..."
                         maxlength="200">
                     <button onclick="sendChatMessage()" class="btn">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tutorial Modal -->
+    <div class="tutorial-modal" id="tutorialModal">
+        <div class="tutorial-modal-content">
+            <div class="tutorial-header">
+                <h2>🎨 Welcome to PixelPlace!</h2>
+                <button class="tutorial-close" onclick="closeTutorial()">×</button>
+            </div>
+            
+            <div class="tutorial-body">
+                <div class="tutorial-step active" id="step1">
+                    <div class="tutorial-icon">🖱️</div>
+                    <h3>Navigate the Canvas</h3>
+                    <p>Use your <strong>mouse wheel</strong> to zoom in/out and <strong>drag</strong> to move around the infinite canvas.</p>
+                </div>
+                
+                <div class="tutorial-step" id="step2">
+                    <div class="tutorial-icon">🎨</div>
+                    <h3>Place Pixels</h3>
+                    <p>Click the <strong>color palette</strong> at the bottom to choose a color, then click anywhere on the canvas to place a pixel.</p>
+                </div>
+                
+                <div class="tutorial-step" id="step3">
+                    <div class="tutorial-icon">⚡</div>
+                    <h3>Bulk Placement</h3>
+                    <p>Hold <strong>Space</strong> and drag to preview multiple pixels, then release to place them all at once!</p>
+                </div>
+                
+                <div class="tutorial-step" id="step4">
+                    <div class="tutorial-icon">💬</div>
+                    <h3>Chat & Community</h3>
+                    <p>Use the chat panel to communicate with other artists. Work together to create amazing pixel art!</p>
+                </div>
+                
+                <div class="tutorial-step" id="step5">
+                    <div class="tutorial-icon">⏱️</div>
+                    <h3>Pixel Bag System</h3>
+                    <p>You have a limited number of pixels that refill over time. Use them wisely to create your masterpiece!</p>
+                </div>
+            </div>
+            
+            <div class="tutorial-footer">
+                <button class="tutorial-nav-btn" id="prevBtn" onclick="previousStep()" disabled>Previous</button>
+                <div class="tutorial-dots">
+                    <span class="dot active" onclick="goToStep(1)"></span>
+                    <span class="dot" onclick="goToStep(2)"></span>
+                    <span class="dot" onclick="goToStep(3)"></span>
+                    <span class="dot" onclick="goToStep(4)"></span>
+                    <span class="dot" onclick="goToStep(5)"></span>
+                </div>
+                <button class="tutorial-nav-btn" id="nextBtn" onclick="nextStep()">Next</button>
+            </div>
+            
+            <div class="tutorial-bottom">
+                <label class="tutorial-checkbox">
+                    <input type="checkbox" id="dontShowAgain"> Don't show this again
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <!-- Profile Modal -->
+    <div class="profile-modal" id="profileModal">
+        <div class="profile-modal-content">
+            <div class="profile-header">
+                <h2>👤 Player Profile</h2>
+                <button class="profile-close" onclick="closeProfile()">×</button>
+            </div>
+            
+            <div class="profile-body">
+                <div class="profile-card">
+                    <div class="profile-avatar">
+                        <span class="avatar-emoji" id="profileAvatar">🎨</span>
+                    </div>
+                    <div class="profile-info">
+                        <h3 id="profileUsername">Loading...</h3>
+                        <div class="profile-level">
+                            <span class="level-badge" id="profileLevel">Level 1</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="profile-stats">
+                    <div class="stat-card pixels-placed">
+                        <div class="stat-icon">🎯</div>
+                        <div class="stat-info">
+                            <div class="stat-number" id="statPixelsPlaced">0</div>
+                            <div class="stat-label">Pixels Placed</div>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card time-active">
+                        <div class="stat-icon">⏰</div>
+                        <div class="stat-info">
+                            <div class="stat-number" id="statTimeActive">0h</div>
+                            <div class="stat-label">Time Active</div>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card pixel-bag">
+                        <div class="stat-icon">💰</div>
+                        <div class="stat-info">
+                            <div class="stat-number" id="statPixelBag">0/0</div>
+                            <div class="stat-label">Pixel Bag</div>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card join-date">
+                        <div class="stat-icon">📅</div>
+                        <div class="stat-info">
+                            <div class="stat-number" id="statJoinDate">Today</div>
+                            <div class="stat-label">Joined</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="profile-achievements">
+                    <h4>🏆 Achievements</h4>
+                    <div class="achievements-grid" id="achievementsGrid">
+                        <div class="achievement locked">
+                            <div class="achievement-icon">🎨</div>
+                            <div class="achievement-name">First Pixel</div>
+                            <div class="achievement-desc">Place your first pixel</div>
+                        </div>
+                        <div class="achievement locked">
+                            <div class="achievement-icon">🔥</div>
+                            <div class="achievement-name">On Fire</div>
+                            <div class="achievement-desc">Place 100 pixels</div>
+                        </div>
+                        <div class="achievement locked">
+                            <div class="achievement-icon">⚡</div>
+                            <div class="achievement-name">Bulk Master</div>
+                            <div class="achievement-desc">Use bulk placement 10 times</div>
+                        </div>
+                        <div class="achievement locked">
+                            <div class="achievement-icon">💬</div>
+                            <div class="achievement-name">Social Artist</div>
+                            <div class="achievement-desc">Send 50 chat messages</div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>

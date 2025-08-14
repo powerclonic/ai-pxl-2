@@ -6,6 +6,7 @@ from enum import Enum
 class MessageType(Enum):
     """WebSocket message types"""
     PIXEL_PLACE = "pixel_place"
+    BULK_PIXEL_PLACE = "bulk_pixel_place"
     PIXEL_UPDATE = "pixel_update"
     CHAT_MESSAGE = "chat_message"
     CHAT_BROADCAST = "chat_broadcast"

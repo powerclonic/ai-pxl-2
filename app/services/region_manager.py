@@ -21,13 +21,28 @@ class RegionManager:
         self.canvas_service = CanvasService()
         self.user_service = UserService()
         self.region_connections: Dict[Tuple[int, int], Set[str]] = {}
+        self.user_regions: Dict[str, Set[Tuple[int, int]]] = {}  # Track which regions each user is in
         self.chat_history: Dict[Tuple[int, int], List[ChatMessage]] = {}
+        self._initialized = False
         
         # Initialize region connections and chat history
         for region_x in range(settings.REGIONS_PER_SIDE):
             for region_y in range(settings.REGIONS_PER_SIDE):
                 self.region_connections[(region_x, region_y)] = set()
                 self.chat_history[(region_x, region_y)] = []
+                
+    async def initialize(self):
+        """Initialize the region manager and canvas service"""
+        if not self._initialized:
+            await self.canvas_service.initialize()
+            self._initialized = True
+            print("Region manager initialized")
+            
+    async def shutdown(self):
+        """Shutdown the region manager"""
+        if self._initialized:
+            await self.canvas_service.shutdown()
+            print("Region manager shutdown complete")
     
     async def connect_user(self, websocket: WebSocket, user_id: str):
         """Connect a user and place them in the center region initially"""
@@ -44,6 +59,9 @@ class RegionManager:
         )
         
         self.user_service.add_user(user)
+        
+        # Initialize user's region set
+        self.user_regions[user_id] = {center_region}
         self.region_connections[center_region].add(user_id)
         
         # Send initial region data
@@ -64,19 +82,59 @@ class RegionManager:
         if not user:
             return
         
-        region_coords = (user.current_region_x, user.current_region_y)
-        
-        # Remove from region
-        self.region_connections[region_coords].discard(user_id)
-        
-        # Notify others in the region
-        await self.broadcast_to_region(region_coords[0], region_coords[1], {
-            "type": MessageType.USER_LEAVE.value,
-            "user_id": user_id,
-            "users_in_region": len(self.region_connections[region_coords])
-        }, exclude_user=user_id)
+        # Remove from all regions the user was connected to
+        if user_id in self.user_regions:
+            for region_coords in self.user_regions[user_id].copy():
+                self.region_connections[region_coords].discard(user_id)
+                
+                # Notify others in each region
+                await self.broadcast_to_region(region_coords[0], region_coords[1], {
+                    "type": MessageType.USER_LEAVE.value,
+                    "user_id": user_id,
+                    "users_in_region": len(self.region_connections[region_coords])
+                }, exclude_user=user_id)
+            
+            # Clear user's region tracking
+            del self.user_regions[user_id]
         
         self.user_service.remove_user(user_id)
+    
+    async def update_user_regions(self, user_id: str, visible_regions: List[Tuple[int, int]]):
+        """Update which regions a user is connected to based on their viewport"""
+        user = self.user_service.get_user(user_id)
+        if not user:
+            return
+        
+        # Convert to set for easier comparison
+        new_regions = set(visible_regions)
+        
+        # Get current regions or initialize if user not tracked
+        current_regions = self.user_regions.get(user_id, set())
+        
+        # Find regions to add and remove
+        regions_to_add = new_regions - current_regions
+        regions_to_remove = current_regions - new_regions
+        
+        # Remove user from old regions
+        for region_coords in regions_to_remove:
+            if region_coords in self.region_connections:
+                self.region_connections[region_coords].discard(user_id)
+        
+        # Add user to new regions
+        for region_coords in regions_to_add:
+            if region_coords in self.region_connections:
+                self.region_connections[region_coords].add(user_id)
+        
+        # Update user's region tracking
+        self.user_regions[user_id] = new_regions
+        
+        # Update user's primary region (for chat) to the first region
+        if visible_regions:
+            user.current_region_x = visible_regions[0][0]
+            user.current_region_y = visible_regions[0][1]
+        
+        if regions_to_add or regions_to_remove:
+            print(f"🗺️ User {user_id} regions updated: +{len(regions_to_add)} -{len(regions_to_remove)} = {len(new_regions)} total")
     
     async def move_user_to_region(self, user_id: str, new_region_x: int, new_region_y: int):
         """Move user to a different region"""
@@ -138,8 +196,8 @@ class RegionManager:
             })
             return False
         
-        # Place pixel
-        if not self.canvas_service.place_pixel(x, y, color, user_id):
+                # Place the pixel
+        if not await self.canvas_service.place_pixel(x, y, color, user_id):
             return False
         
         # Consume a pixel from database and update stats
@@ -152,8 +210,9 @@ class RegionManager:
         
         print(f"📊 User {user_id} placed a pixel! DB Bag: {authenticated_user.pixel_bag_size}/{authenticated_user.max_pixel_bag_size}")
         
-        # Broadcast pixel update to all users in the region
-        region_coords = self.canvas_service.get_region_coords(x, y)
+        # Broadcast pixel update to all users in ALL regions where the placer is connected
+        # This ensures users in adjacent regions also see the pixel update
+        pixel_region_coords = self.canvas_service.get_region_coords(x, y)
         pixel_update_message = {
             "type": MessageType.PIXEL_UPDATE.value,
             "x": x,
@@ -162,8 +221,21 @@ class RegionManager:
             "user_id": user_id,
             "timestamp": current_time
         }
-        print(f"DEBUG: Broadcasting pixel update to region {region_coords}: {pixel_update_message}")
-        await self.broadcast_to_region(region_coords[0], region_coords[1], pixel_update_message)
+        
+        # Get all regions where this user is connected
+        user_connected_regions = self.user_regions.get(user_id, set())
+        
+        # Always broadcast to the pixel's actual region
+        regions_to_broadcast = {pixel_region_coords}
+        
+        # Also broadcast to user's connected regions (in case pixel is near border)
+        regions_to_broadcast.update(user_connected_regions)
+        
+        print(f"DEBUG: Broadcasting pixel update to {len(regions_to_broadcast)} regions: {regions_to_broadcast}")
+        
+        for region_coords in regions_to_broadcast:
+            if region_coords in self.region_connections:
+                await self.broadcast_to_region(region_coords[0], region_coords[1], pixel_update_message)
         
         return True
     
