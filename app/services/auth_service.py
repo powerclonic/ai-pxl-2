@@ -9,6 +9,11 @@ from typing import Optional, Dict, List
 from dataclasses import dataclass, field
 import random
 import jwt
+import asyncio
+
+from app.db.database import get_session
+from app.db.repositories.user_repository import user_repository
+from app.db.database import redis_client
 
 from app.core.config import Settings
 from app.models.models import User, AuthenticatedUser, UserRole, CaptchaChallenge
@@ -27,16 +32,45 @@ class AuthService:
         self.session_tokens: Dict[str, str] = {}  # token -> user_id
         self.session_locks: Dict[str, float] = {}  # user_id -> timestamp (for race condition prevention)
         
-        # Load existing users from persistence
-        self.users = persistence_service.load_users()
-        print(f"✅ Loaded {len(self.users)} users from persistence")
-        
-        # Load existing sessions from persistence
-        self.session_tokens, self.session_locks = persistence_service.load_sessions()
-        print(f"✅ Loaded {len(self.session_tokens)} active sessions from persistence")
-        
-        # Create default admin user
-        self._create_default_admin()
+        # Async load from DB (fallback to JSON seed)
+        self._bootstrap_done = False
+        async def _bootstrap():
+            loaded_from = "db"
+            try:
+                async for session in get_session():
+                    db_users = await user_repository.get_all_users(session)
+                    if db_users:
+                        self.users = {u.username: u for u in db_users}
+                    else:
+                        # Fallback seed from JSON persistence
+                        self.users = persistence_service.load_users()
+                        loaded_from = "json"
+                        # Seed DB
+                        for u in self.users.values():
+                            await user_repository.upsert_user(session, u)
+                        await session.commit()
+            except Exception as e:
+                print(f"⚠️ User bootstrap failed: {e}; using JSON only")
+                if not self.users:
+                    self.users = persistence_service.load_users()
+                    loaded_from = "json-error"
+            # Load sessions (still file-based)
+            self.session_tokens, self.session_locks = persistence_service.load_sessions()
+            print(f"✅ Loaded {len(self.users)} users from {loaded_from} | sessions={len(self.session_tokens)}")
+            # Ensure default admin exists (and persisted)
+            self._create_default_admin()
+            async for session in get_session():
+                await user_repository.upsert_user(session, self.users[self.settings.DEFAULT_ADMIN_USERNAME])
+                await session.commit()
+            self._bootstrap_done = True
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_bootstrap())
+            else:
+                loop.run_until_complete(_bootstrap())
+        except RuntimeError:
+            asyncio.run(_bootstrap())
     
     def _create_default_admin(self):
         """Create default admin user if it doesn't exist"""
@@ -397,8 +431,53 @@ class AuthService:
             self._save_sessions()  # Save sessions to persistence if any were removed
     
     def _save_users(self):
-        """Save users to persistence"""
-        persistence_service.save_users(self.users)
+        """Persist all users to DB (batch) and JSON (legacy backup)."""
+        async def _save():
+            try:
+                async for session in get_session():
+                    for u in self.users.values():
+                        await user_repository.upsert_user(session, u)
+                    await session.commit()
+            except Exception as e:
+                print(f"⚠️ DB save users failed: {e}")
+            # Legacy backup JSON (best-effort)
+            try:
+                persistence_service.save_users(self.users)
+            except Exception as e:
+                print(f"⚠️ JSON backup save failed: {e}")
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_save())
+            else:
+                loop.run_until_complete(_save())
+        except RuntimeError:
+            asyncio.run(_save())
+
+    def _save_user(self, username: str):
+        """Persist a single user (optimized for frequent updates)."""
+        user = self.users.get(username)
+        if not user:
+            return
+        async def _save_one():
+            try:
+                async for session in get_session():
+                    await user_repository.upsert_user(session, user)
+                    await session.commit()
+            except Exception as e:
+                print(f"⚠️ DB save user {username} failed: {e}")
+            try:
+                persistence_service.save_users(self.users)
+            except Exception:
+                pass
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_save_one())
+            else:
+                loop.run_until_complete(_save_one())
+        except RuntimeError:
+            asyncio.run(_save_one())
     
     def _save_sessions(self):
         """Save sessions to persistence"""
@@ -413,12 +492,23 @@ class AuthService:
                 user.last_pixel_placed_at = datetime.now()
                 # Award experience points
                 user.experience_points += pixels_placed * 10
+                # Redis counter
+                try:
+                    if redis_client:
+                        redis_client.hincrby('counters:pixels', user_id, pixels_placed)
+                except Exception:
+                    pass
             
             if messages_sent > 0:
                 user.total_messages_sent += messages_sent
                 user.last_message_sent_at = datetime.now()
                 # Award experience points
                 user.experience_points += messages_sent * 5
+                try:
+                    if redis_client:
+                        redis_client.hincrby('counters:messages', user_id, messages_sent)
+                except Exception:
+                    pass
             
             # Level up system
             required_xp = user.user_level * 1000
@@ -427,9 +517,57 @@ class AuthService:
                 # Upgrade pixel bag size as reward (no hardcoded limit)
                 user.max_pixel_bag_size += 5
                 user.pixel_bag_size = user.max_pixel_bag_size
-                print(f"🎉 User {user.username} leveled up! New max bag: {user.max_pixel_bag_size}")
+                print(f"LEVEL UP: User {user.username} leveled up – new max bag: {user.max_pixel_bag_size}")
             
-            self._save_users()
+            self._save_user(user_id)
+            # After saving, evaluate achievements server-side (only for pixel/chat based)
+            try:
+                from app.services.achievement_service import achievement_service
+                newly = achievement_service.evaluate_for_user(user_id)
+                if newly:
+                    print(f"🏅 User {user_id} unlocked: {newly}")
+            except Exception as e:
+                print(f"⚠️ Achievement evaluation failed: {e}")
+
+    # ==================== ACHIEVEMENTS ====================
+    def unlock_achievement(self, username: str, achievement_id: str) -> bool:
+        """Unlock a single achievement for a user (idempotent)."""
+        user = self.get_user_by_username(username)
+        if not user:
+            return False
+        if achievement_id not in user.achievements:
+            user.achievements.append(achievement_id)
+            self._save_user(username)
+            print(f"ACHIEVEMENT: unlocked for {username}: {achievement_id}")
+            return True
+        return False
+
+    def set_achievements(self, username: str, achievement_ids: list[str]) -> bool:
+        """Replace user's achievements with provided list (used for sync)."""
+        user = self.get_user_by_username(username)
+        if not user:
+            return False
+        # Ensure uniqueness
+        user.achievements = list(dict.fromkeys(achievement_ids))
+        self._save_users()
+        return True
+
+    def get_user_achievements(self, username: str) -> list[str]:
+        user = self.get_user_by_username(username)
+        return user.achievements[:] if user else []
+
+    def get_global_achievement_distribution(self) -> dict:
+        """Return {achievement_id: {count: int, percentage: float}}"""
+        distribution: dict[str, dict] = {}
+        total_users = max(1, len(self.users))
+        for user in self.users.values():
+            for ach in getattr(user, 'achievements', []) or []:
+                entry = distribution.setdefault(ach, {"count": 0})
+                entry["count"] += 1
+        # Compute percentages
+        for ach_id, data in distribution.items():
+            data["percentage"] = round((data["count"] / total_users) * 100, 2)
+        return {"total_users": total_users, "achievements": distribution}
     
     def get_user_by_id(self, user_id: str) -> Optional[AuthenticatedUser]:
         """Get user by ID"""
@@ -462,7 +600,7 @@ class AuthService:
             user.last_pixel_placed_at = current_time
             
             # Save to database
-            self._save_users()
+            self._save_user(username)
             
             pixels_added = user.pixel_bag_size - old_count
             if pixels_added > 0:
@@ -514,7 +652,7 @@ class AuthService:
                         print(f"✅ Synced WebSocket user {username} pixel_bag to new max: {converted_value}")
                 
                 # Save to persistence
-                self._save_users()
+                self._save_user(username)
                 return True
             else:
                 print(f"❌ Field {field} not found on user model")
@@ -527,3 +665,51 @@ class AuthService:
 
 # Global auth service instance
 auth_service = AuthService()
+
+# Background flush task for Redis counters -> DB
+async def _flush_counters_loop():
+    if not redis_client:
+        return
+    while True:
+        try:
+            await asyncio.sleep(5)
+            pixel_map = await redis_client.hgetall('counters:pixels') if redis_client else {}
+            msg_map = await redis_client.hgetall('counters:messages') if redis_client else {}
+            if not pixel_map and not msg_map:
+                continue
+            async for session in get_session():
+                for uid, inc in pixel_map.items():
+                    u = auth_service.get_user_by_username(uid)
+                    if u:
+                        # Already incremented locally; just persist
+                        await user_repository.upsert_user(session, u)
+                for uid, inc in msg_map.items():
+                    u = auth_service.get_user_by_username(uid)
+                    if u:
+                        await user_repository.upsert_user(session, u)
+                await session.commit()
+            # Reset counters after flush
+            pipe = redis_client.pipeline(True)
+            pipe.delete('counters:pixels')
+            pipe.delete('counters:messages')
+            await pipe.execute()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"⚠️ Counter flush error: {e}")
+
+def _schedule_counter_flush():
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_flush_counters_loop())
+        else:
+            # Defer until loop actually starts: use a short-lived background thread trigger
+            def _delayed():
+                asyncio.run(_flush_counters_loop())
+            import threading
+            threading.Thread(target=_delayed, daemon=True).start()
+    except RuntimeError:
+        pass
+
+_schedule_counter_flush()

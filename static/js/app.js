@@ -57,6 +57,21 @@ let lastBulkPixelTime = 0;
 const BULK_PLACEMENT_DELAY = 10; // milliseconds between bulk pixels
 let bulkPlacementPath = new Set(); // Track pixels already placed in current bulk session
 let bulkPreviewPixels = new Map(); // Store preview pixels {x,y} -> color
+// Performance helpers for bulk preview rendering
+const BULK_PREVIEW_SIMPLE_THRESHOLD = 250; // Above this, use simpler rendering to avoid lag
+let renderPending = false; // Guard multiple renders per frame
+let lastBulkIndicatorUpdate = 0; // Throttle indicator DOM updates
+const BULK_INDICATOR_UPDATE_MS = 60; // Min ms between indicator updates
+
+function scheduleRender() {
+    if (!renderPending) {
+        renderPending = true;
+        requestAnimationFrame(() => {
+            renderPending = false;
+            renderCanvas();
+        });
+    }
+}
 
 // Configuration - will be loaded from server
 let CONFIG = {
@@ -139,10 +154,10 @@ async function init() {
         const configLoaded = await loadConfig();
         console.log('✅ Configuration loaded:', configLoaded);
 
-        console.log('🎨 Setting up canvas...');
+    console.log('Setting up canvas...');
         setupCanvas();
         
-        console.log('🎨 Setting up color palette...');
+    console.log('Setting up color palette...');
         setupColorPalette();
         
         console.log('🎧 Setting up event listeners...');
@@ -185,7 +200,7 @@ async function init() {
         updateStatus('Connecting...', 'connecting');
         updatePixelBagDisplay();
         
-        console.log('🎉 Basic initialization complete! Checking authentication...');
+    console.log('Initialization complete. Checking authentication...');
         
         // Check authentication status via API before proceeding
         await checkAuthenticationStatus();
@@ -230,8 +245,8 @@ function setupCanvas() {
     canvas.width = Math.max(rect.width, minWidth);
     canvas.height = Math.max(rect.height, minHeight);
     
-    console.log('🎨 Canvas setup - container rect:', rect.width, 'x', rect.height);
-    console.log('🎨 Canvas final size:', canvas.width, 'x', canvas.height);
+    console.log('Canvas setup - container rect:', rect.width, 'x', rect.height);
+    console.log('Canvas final size:', canvas.width, 'x', canvas.height);
 
     // Fill with light background
     ctx.fillStyle = '#f8fafc';
@@ -279,6 +294,15 @@ function adjustCameraBounds() {
     
     // Update visible regions after camera changes
     updateVisibleRegions();
+}
+
+// Center camera helper (navbar logo)
+function zoomToCenter() {
+    cameraX = CONFIG.CANVAS_SIZE / 2;
+    cameraY = CONFIG.CANVAS_SIZE / 2;
+    // Gentle animation effect could be added; for now just re-render
+    updateVisibleRegions();
+    renderCanvas();
 }
 
 function setupColorPalette() {
@@ -362,6 +386,26 @@ function updatePixelBagDisplay() {
     if (palette.classList.contains('minimized')) {
         toggleText.textContent = `${pixelBag}/${maxPixelBag} pixels`;
     }
+
+    updateRefillETA();
+}
+
+// Estimate refill ETA (client-side heuristic; server authoritative on bag size)
+function updateRefillETA() {
+    // Requires CONFIG.PIXEL_REFILL_RATE seconds per pixel
+    const etaEl = document.getElementById('pixelRefillEta');
+    if (!etaEl) return;
+    if (pixelBag >= maxPixelBag) {
+        etaEl.textContent = 'Full';
+        etaEl.className = 'refill-eta full';
+        return;
+    }
+    const missing = maxPixelBag - pixelBag;
+    const seconds = missing * CONFIG.PIXEL_REFILL_RATE;
+    let txt;
+    if (seconds < 60) txt = `${seconds}s`; else if (seconds < 3600) txt = `${Math.floor(seconds/60)}m ${seconds%60|0}s`; else txt = `${Math.floor(seconds/3600)}h`;
+    etaEl.textContent = `~${txt}`;
+    etaEl.className = 'refill-eta';
 }
 
 function updateVisibleRegions() {
@@ -503,7 +547,7 @@ function ensureRegionLoadedForPosition(worldX, worldY) {
     const regionKey = `${regionX},${regionY}`;
     
     if (!loadedRegions.has(regionKey)) {
-        console.log(`🎯 FALLBACK: Loading region ${regionKey} for hover at ${worldX},${worldY}`);
+        console.log(`Region fallback load ${regionKey} for hover at ${worldX},${worldY}`);
         loadRegionPixels(regionX, regionY);
         loadedRegions.add(regionKey);
     }
@@ -531,14 +575,14 @@ function forceLoadAllVisibleRegions() {
     const startRegionY = Math.max(0, Math.floor((topY - generousPadding) / CONFIG.REGION_SIZE));
     const endRegionY = Math.min(CONFIG.CANVAS_SIZE / CONFIG.REGION_SIZE - 1, Math.floor((bottomY + generousPadding) / CONFIG.REGION_SIZE));
     
-    console.log(`🎯 Force loading regions ${startRegionX}-${endRegionX} x ${startRegionY}-${endRegionY}`);
+    console.log(`Force loading regions ${startRegionX}-${endRegionX} x ${startRegionY}-${endRegionY}`);
     
     let forcedLoads = 0;
     for (let x = startRegionX; x <= endRegionX; x++) {
         for (let y = startRegionY; y <= endRegionY; y++) {
             const regionKey = `${x},${y}`;
             if (!loadedRegions.has(regionKey)) {
-                console.log(`⚡ FORCE: Loading region ${regionKey}`);
+                console.log(`Force: loading region ${regionKey}`);
                 loadRegionPixels(x, y);
                 loadedRegions.add(regionKey);
                 forcedLoads++;
@@ -546,7 +590,7 @@ function forceLoadAllVisibleRegions() {
         }
     }
     
-    console.log(`⚡ Force loaded ${forcedLoads} regions`);
+    console.log(`Force loaded ${forcedLoads} regions`);
     return forcedLoads;
 }
 
@@ -729,57 +773,45 @@ function renderCanvas() {
         }
     }
 
-    // Draw preview pixels (bulk mode)
+    // Draw preview pixels (bulk mode) with adaptive complexity for performance
     if (isBulkMode && bulkPreviewPixels.size > 0) {
+        const simpleMode = bulkPreviewPixels.size > BULK_PREVIEW_SIMPLE_THRESHOLD;
+        const time = Date.now() * 0.003;
         for (const [pixelKey, color] of bulkPreviewPixels.entries()) {
             const [x, y] = pixelKey.split(',').map(Number);
-
-            // Check if preview pixel is in viewport
-            if (x >= leftX && x < leftX + viewWidth &&
-                y >= topY && y < topY + viewHeight) {
-
+            if (x >= leftX && x < leftX + viewWidth && y >= topY && y < topY + viewHeight) {
                 const screenX = (x - leftX) * zoom;
                 const screenY = (y - topY) * zoom;
-
-                // Calculate pulse effect based on time
-                const time = Date.now() * 0.003;
-                const pulse = 0.1 + 0.1 * Math.sin(time + x * 0.1 + y * 0.1);
-                
-                // Draw preview pixel with animated effect
-                ctx.fillStyle = color;
-                ctx.globalAlpha = 0.6 + pulse; // Pulsing transparency
-                ctx.fillRect(screenX, screenY, zoom, zoom);
-                
-                // Add animated glowing border effect
-                ctx.globalAlpha = 0.8 + pulse * 0.5;
-                ctx.strokeStyle = '#ffffff';
-                ctx.lineWidth = Math.max(1, zoom * 0.1) + pulse;
-                ctx.strokeRect(screenX - pulse, screenY - pulse, zoom + pulse * 2, zoom + pulse * 2);
-                
-                // Add inner highlight with shimmer
-                ctx.globalAlpha = 0.9;
-                ctx.strokeStyle = color;
-                ctx.lineWidth = Math.max(0.5, zoom * 0.05);
-                ctx.strokeRect(screenX + 1, screenY + 1, zoom - 2, zoom - 2);
-                
-                // Add sparkle effect for high zoom
-                if (zoom > 4) {
-                    const sparkle = Math.sin(time * 2 + x * 0.5 + y * 0.5);
-                    if (sparkle > 0.7) {
-                        ctx.fillStyle = '#ffffff';
-                        ctx.globalAlpha = sparkle - 0.5;
-                        const sparkleSize = 2;
-                        ctx.fillRect(
-                            screenX + zoom/2 - sparkleSize/2, 
-                            screenY + zoom/2 - sparkleSize/2, 
-                            sparkleSize, 
-                            sparkleSize
-                        );
+                if (simpleMode) {
+                    ctx.globalAlpha = 0.55;
+                    ctx.fillStyle = color;
+                    ctx.fillRect(screenX, screenY, zoom, zoom);
+                } else {
+                    const pulse = 0.1 + 0.1 * Math.sin(time + x * 0.1 + y * 0.1);
+                    ctx.fillStyle = color;
+                    ctx.globalAlpha = 0.6 + pulse;
+                    ctx.fillRect(screenX, screenY, zoom, zoom);
+                    ctx.globalAlpha = 0.8 + pulse * 0.5;
+                    ctx.strokeStyle = '#ffffff';
+                    ctx.lineWidth = Math.max(1, zoom * 0.1) + pulse;
+                    ctx.strokeRect(screenX - pulse, screenY - pulse, zoom + pulse * 2, zoom + pulse * 2);
+                    ctx.globalAlpha = 0.9;
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = Math.max(0.5, zoom * 0.05);
+                    ctx.strokeRect(screenX + 1, screenY + 1, zoom - 2, zoom - 2);
+                    if (zoom > 4) {
+                        const sparkle = Math.sin(time * 2 + x * 0.5 + y * 0.5);
+                        if (sparkle > 0.7) {
+                            ctx.fillStyle = '#ffffff';
+                            ctx.globalAlpha = sparkle - 0.5;
+                            const sparkleSize = 2;
+                            ctx.fillRect(screenX + zoom/2 - sparkleSize/2, screenY + zoom/2 - sparkleSize/2, sparkleSize, sparkleSize);
+                        }
                     }
                 }
             }
         }
-        ctx.globalAlpha = 1; // Reset alpha
+        ctx.globalAlpha = 1;
     }
 }
 
@@ -832,6 +864,19 @@ function handleMessage(data) {
             updateStatus('Connected', 'connected');
             pulseConnectionIndicator();
             // Now that we're authenticated, we can start using the canvas
+            // Load achievements from backend and merge with local (union)
+            currentUsername = data.user.username;
+            fetch('/api/achievements', { headers: { 'Authorization': `Bearer ${authToken}` }})
+                .then(r => r.json())
+                .then(serverData => {
+                    loadUnlockedAchievements(); // local
+                    const serverSet = new Set(serverData.achievements || []);
+                    const merged = new Set([...serverSet, ...unlockedAchievements]);
+                    unlockedAchievements = merged;
+                    persistUnlockedAchievements();
+                    renderAchievementsGrid();
+                })
+                .catch(e => console.warn('Failed to load server achievements', e));
             break;
         case 'auth_error':
             console.error('WebSocket authentication failed:', data.message);
@@ -849,6 +894,19 @@ function handleMessage(data) {
             // Track pixel placement for achievements (only if it's the current user)
             if (data.user_id === currentUsername) {
                 pixelsPlacedCount++;
+                achievementCountChanged();
+            }
+            break;
+        case 'pixel_batch_update':
+            // New optimized batch update
+            if (Array.isArray(data.updates)) {
+                for (const upd of data.updates) {
+                    updatePixel(upd.x, upd.y, upd.color);
+                    if (upd.user_id === currentUsername) {
+                        pixelsPlacedCount++;
+                    }
+                }
+                achievementCountChanged();
             }
             break;
         case 'pixel_bag_update':
@@ -856,6 +914,7 @@ function handleMessage(data) {
             pixelBag = data.pixel_bag_size;
             maxPixelBag = data.max_pixel_bag_size;
             updatePixelBagDisplay();
+            updateRefillETA();
             break;
         case 'bulk_complete':
             console.log(`🚀 Bulk placement complete: ${data.placed}/${data.requested} pixels placed (available at start: ${data.available_at_start})`);
@@ -864,6 +923,7 @@ function handleMessage(data) {
             if (data.placed > 0) {
                 bulkPlacementsCount++;
                 pixelsPlacedCount += data.placed; // Add the placed pixels to total count
+                achievementCountChanged();
             }
             
             // Create success animation with detailed stats
@@ -882,10 +942,12 @@ function handleMessage(data) {
                 }
             }
             
+            const remainingMsg = typeof data.remaining === 'number' ? ` • Remaining: ${data.remaining}` : '';
+            const durationMsg = typeof data.duration_ms === 'number' ? ` • ${data.duration_ms}ms` : '';
             if (data.placed < data.requested) {
-                addSystemMessage(`⚠️ Bulk placement: ${data.placed}/${data.requested} pixels placed (pixel bag limit)`);
+                addSystemMessage(`⚠️ Bulk: ${data.placed}/${data.requested} placed (bag/time limit)${remainingMsg}${durationMsg}`);
             } else {
-                addSystemMessage(`✅ Successfully placed ${data.placed} pixels`);
+                addSystemMessage(`✅ Bulk OK: ${data.placed}/${data.requested}${remainingMsg}${durationMsg}`);
             }
             
             // Clear preview pixels after showing results
@@ -997,7 +1059,8 @@ function updatePixel(globalX, globalY, color) {
 
 function updateUserCount(count) {
     userCount = count;
-    document.getElementById('userCount').textContent = `${count} users`;
+    const el = document.getElementById('userCount');
+    if (el) el.textContent = `${count} users`;
 }
 
 function setupEventListeners() {
@@ -1046,7 +1109,7 @@ function setupEventListeners() {
 }
 
 function handleCanvasClick(event) {
-    console.log('🎯 Canvas click event fired');
+    console.log('Canvas click event fired');
 
     const clickTime = Date.now();
     const timeSinceMouseDown = clickTime - mouseDownTime;
@@ -1289,18 +1352,56 @@ function getRelativeTime(timestamp) {
 
 function togglePanel(panelId) {
     const panel = document.getElementById(panelId);
-    const btn = panel.querySelector('.minimize-btn');
-
+    if (!panel) return;
     panel.classList.toggle('minimized');
-    btn.textContent = panel.classList.contains('minimized') ? '+' : '−';
+    const btn = panel.querySelector('.minimize-btn');
+    if (btn) btn.textContent = panel.classList.contains('minimized') ? '+' : '−';
+    panel.setAttribute('aria-expanded', (!panel.classList.contains('minimized')).toString());
+}
+
+// New chat shell toggle
+function toggleChatShell() {
+    const shell = document.getElementById('chatPanel');
+    if (!shell) return;
+    const minimized = shell.classList.toggle('minimized');
+    shell.setAttribute('aria-expanded', (!minimized).toString());
+    if (!minimized) {
+        // reset unread badge
+        const badge = document.getElementById('chatUnreadBadge');
+        if (badge) { badge.style.display='none'; badge.textContent='0'; }
+        // auto-scroll
+        const msgs = document.getElementById('chatMessages');
+        if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    }
+    const chevron = document.getElementById('chatChevron');
+    if (chevron) chevron.textContent = minimized ? 'expand_more' : 'expand_less';
+}
+
+// Hook into message append to increment unread if minimized
+function appendChatMessageElement(el) {
+    const shell = document.getElementById('chatPanel');
+    const msgs = document.getElementById('chatMessages');
+    if (!msgs) return;
+    msgs.appendChild(el);
+    const nearBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 32;
+    if (shell && !shell.classList.contains('minimized') && nearBottom) {
+        msgs.scrollTop = msgs.scrollHeight;
+    } else if (shell && shell.classList.contains('minimized')) {
+        const badge = document.getElementById('chatUnreadBadge');
+        if (badge) {
+            let v = parseInt(badge.textContent || '0', 10) || 0;
+            v += 1;
+            badge.textContent = String(v);
+            badge.style.display = 'inline-flex';
+        }
+    }
 }
 
 function pulseConnectionIndicator() {
     const indicator = document.getElementById('connectionIndicator');
+    if (!indicator) return;
     indicator.classList.add('pulse-event');
-    setTimeout(() => {
-        indicator.classList.remove('pulse-event');
-    }, 600);
+    setTimeout(() => { if(indicator) indicator.classList.remove('pulse-event'); }, 600);
 }
 
 function updatePixelPreview(mouseX, mouseY) {
@@ -1355,7 +1456,8 @@ function updatePing() {
 function handlePong(timestamp) {
     const now = Date.now();
     ping = now - timestamp;
-    document.getElementById('pingDisplay').textContent = ping + 'ms';
+    const el = document.getElementById('pingDisplay');
+    if (el) el.textContent = ping + 'ms';
 }
 
 function handleMouseUp(event) {
@@ -1384,7 +1486,7 @@ function handleMouseUp(event) {
             wasDragging = false;
         }, 150);
     } else {
-        console.log('🎯 Click detected - placing pixel');
+    console.log('Click detected - placing pixel');
         // This was a genuine click, not a drag
         wasDragging = false;
     }
@@ -1446,6 +1548,7 @@ function placePixel(x, y, color) {
             bagDisplay.style.animation = 'shake 0.5s ease-in-out';
             setTimeout(() => bagDisplay.style.animation = '', 500);
         }
+    console.warn('🚫 Blocked pixel placement locally: pixel bag empty (0).');
         return;
     }
 
@@ -1486,7 +1589,7 @@ function handleKeyDown(event) {
         bulkIndicator.id = 'bulkIndicator';
         bulkIndicator.innerHTML = `
             <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="font-size: 16px; animation: bounce 0.6s ease-in-out;">🎨</span>
+                <span class="material-symbols-rounded" style="font-size: 20px; animation: bounce 0.6s ease-in-out;">palette</span>
                 <div>
                     <div style="font-weight: bold;">BULK PAINT MODE</div>
                     <div style="font-size: 11px; opacity: 0.9;">Preview • Release Space to place</div>
@@ -1599,7 +1702,7 @@ function handleKeyUp(event) {
             if (bulkIndicator) {
                 bulkIndicator.innerHTML = `
                     <div style="display: flex; align-items: center; gap: 8px;">
-                        <span style="font-size: 16px; animation: bounce 1s infinite;">⚡</span>
+                        <span class="material-symbols-rounded" style="font-size: 20px; animation: bounce 1s infinite;">bolt</span>
                         <div>
                             <div style="font-weight: bold;">PROCESSING...</div>
                             <div style="font-size: 11px; opacity: 0.9;">Placing ${previewCount} pixels</div>
@@ -1671,7 +1774,7 @@ function placePixelBulk(x, y, color) {
     bulkPlacementPath.add(pixelKey);
     bulkPreviewPixels.set(pixelKey, color);
     
-    console.log(`🎨 PREVIEW: Adding pixel at ${x},${y} (${bulkPreviewPixels.size} total preview)`);
+    console.log(`Preview: adding pixel at ${x},${y} (${bulkPreviewPixels.size} total preview)`);
     
     // Update bulk indicator with count and animation
     const bulkCounter = document.getElementById('bulkCounter');
@@ -1701,33 +1804,34 @@ function placePixelBulk(x, y, color) {
         }, 300);
     }
     
-    // Update the main indicator with pixel availability info
-    const bulkIndicator = document.getElementById('bulkIndicator');
-    if (bulkIndicator && isBulkMode) {
-        const availablePixels = pixelBag;
-        const previewCount = bulkPreviewPixels.size;
-        let statusText = 'Preview • Release Space to place';
-        
-        if (previewCount > availablePixels) {
-            statusText = `⚠️ ${previewCount - availablePixels} over limit • Will place ${availablePixels}`;
-        } else if (previewCount === availablePixels) {
-            statusText = '✅ Using all available pixels';
-        }
-        
-        bulkIndicator.innerHTML = `
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="font-size: 16px; animation: bounce 0.6s ease-in-out;">🎨</span>
-                <div>
-                    <div style="font-weight: bold;">BULK PAINT MODE</div>
-                    <div style="font-size: 11px; opacity: 0.9;">${statusText}</div>
+    // Throttled indicator update to reduce DOM churn
+    const now2 = Date.now();
+    if (now2 - lastBulkIndicatorUpdate > BULK_INDICATOR_UPDATE_MS) {
+        lastBulkIndicatorUpdate = now2;
+        const bulkIndicator = document.getElementById('bulkIndicator');
+        if (bulkIndicator && isBulkMode) {
+            const availablePixels = pixelBag;
+            const previewCount = bulkPreviewPixels.size;
+            let statusText = 'Preview • Release Space to place';
+            if (previewCount > availablePixels) {
+                statusText = `⚠️ ${previewCount - availablePixels} over limit • Will place ${availablePixels}`;
+            } else if (previewCount === availablePixels) {
+                statusText = '✅ Using all available pixels';
+            }
+            bulkIndicator.innerHTML = `
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span class="material-symbols-rounded" style="font-size: 20px; animation: bounce 0.6s ease-in-out;">palette</span>
+                    <div>
+                        <div style="font-weight: bold;">BULK PAINT MODE</div>
+                        <div style="font-size: 11px; opacity: 0.9;">${statusText}</div>
+                    </div>
+                    <span id="bulkCounter" style="background: ${bulkCounter ? bulkCounter.style.background : 'rgba(255,255,255,0.2)'}; padding: 2px 6px; border-radius: 10px; font-size: 12px; transition: all 0.3s ease;">${previewCount}</span>
                 </div>
-                <span id="bulkCounter" style="background: ${bulkCounter ? bulkCounter.style.background : 'rgba(255,255,255,0.2)'}; padding: 2px 6px; border-radius: 10px; font-size: 12px; transition: all 0.3s ease;">${previewCount}</span>
-            </div>
-        `;
+            `;
+        }
     }
-    
-    // Force re-render to show preview pixel
-    renderCanvas();
+    // Schedule batched render
+    scheduleRender();
 }
 
 function sendChatMessage() {
@@ -1752,8 +1856,9 @@ function sendChatMessage() {
         input.value = '';
         lastChatTime = now;
         
-        // Track chat message for achievements
-        chatMessagesCount++;
+    // Track chat message for achievements
+    chatMessagesCount++;
+    achievementCountChanged();
     }
 }
 
@@ -1782,11 +1887,7 @@ function addChatMessage(userId, message, timestamp, userData = null, scroll = tr
         ${escapeHtml(message)}
     `;
 
-    chatMessages.appendChild(messageDiv);
-
-    if (scroll) {
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-    }
+    appendChatMessageElement(messageDiv);
 }
 
 function addSystemMessage(message) {
@@ -1795,31 +1896,100 @@ function addSystemMessage(message) {
     messageDiv.className = 'message system';
     messageDiv.textContent = message;
 
-    chatMessages.appendChild(messageDiv);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    appendChatMessageElement(messageDiv);
 }
 
 function updateStatus(message, statusType = 'connecting') {
     const indicator = document.getElementById('connectionIndicator');
-
-    // Remove all status classes
-    indicator.className = 'status-indicator';
-
-    // Add appropriate status class
-    switch (statusType) {
-        case 'connected':
-            indicator.classList.add('status-connected');
-            break;
-        case 'error':
-            indicator.classList.add('status-error');
-            break;
-        default:
-            indicator.classList.add('status-connecting');
+    const statusTextEl = document.getElementById('connectionStatusText');
+    if (indicator) {
+        indicator.className = 'status-indicator';
+        switch (statusType) {
+            case 'connected':
+                indicator.classList.add('status-connected');
+                break;
+            case 'error':
+                indicator.classList.add('status-error');
+                break;
+            default:
+                indicator.classList.add('status-connecting');
+        }
     }
-
-    // Could add a status text somewhere if needed
+    if (statusTextEl) statusTextEl.textContent = message;
     console.log('Connection status:', message);
 }
+
+// ==================== RANKINGS UI ====================
+function openRankings() {
+    const modal = document.getElementById('rankingsModal');
+    if (!modal) return;
+    modal.classList.add('show');
+    loadRanking('pixels');
+}
+function closeRankings() {
+    const modal = document.getElementById('rankingsModal');
+    if (modal) modal.classList.remove('show');
+}
+function switchRankingTab(btn, type) {
+    document.querySelectorAll('.ranking-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const body = document.getElementById('rankingsBody');
+    if (body) {
+        body.classList.remove('fade-in');
+        body.classList.add('fade-out');
+        setTimeout(() => { loadRanking(type); }, 180);
+    } else {
+        loadRanking(type);
+    }
+}
+async function loadRanking(type) {
+    const body = document.getElementById('rankingsBody');
+    const headerMetric = document.getElementById('metricHeader');
+    const foot = document.getElementById('rankingFootnote');
+    if (body) body.innerHTML = '<tr><td colspan="5" style="text-align:center; opacity:.6;">Loading...</td></tr>';
+    if (headerMetric) headerMetric.textContent = type.charAt(0).toUpperCase() + type.slice(1);
+    try {
+        const resp = await fetch(`/api/rankings?rtype=${encodeURIComponent(type)}`, { headers: { 'Authorization': `Bearer ${authToken}` }});
+        if (!resp.ok) throw new Error('Failed');
+        const data = await resp.json();
+        if (body) {
+            body.innerHTML = '';
+            if (data.results.length === 0) {
+                body.innerHTML = '<tr><td colspan="5" style="text-align:center; opacity:.6;">No data</td></tr>';
+            } else {
+                data.results.forEach(row => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td><span class="rank-badge">#${row.rank}</span></td>
+                        <td>${escapeHtml(row.username)}</td>
+                        <td>${row.value}</td>
+                        <td>${row.level}</td>
+                        <td>${row.achievements}</td>
+                    `;
+                    body.appendChild(tr);
+                });
+            }
+        }
+        if (foot) foot.textContent = `Type: ${data.type} • Showing top ${data.results.length}`;
+        if (body) {
+            body.classList.remove('fade-out');
+            // Force reflow for animation restart
+            void body.offsetWidth;
+            body.classList.add('fade-in');
+        }
+    } catch (e) {
+        if (body) body.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#ef4444;">Error loading rankings</td></tr>';
+    }
+}
+
+// Update mini status indicators in navbar
+function updateMiniStatus() {
+    const uc = document.getElementById('userCountMini');
+    const pingEl = document.getElementById('pingMini');
+    if (uc) uc.textContent = `${userCount} online`;
+    if (pingEl) pingEl.textContent = `${ping}ms`;
+}
+setInterval(updateMiniStatus, 2000);
 
 function escapeHtml(unsafe) {
     return unsafe
@@ -2178,12 +2348,17 @@ async function checkStoredAuth() {
 
 // Admin Panel Functions
 async function openAdminPanel() {
-    document.getElementById('adminModal').style.display = 'flex';
+    const overlay = document.getElementById('adminModal');
+    overlay.style.display = 'flex';
+    overlay.classList.add('visible');
+    // Default to users
+    switchAdminSection(document.querySelector('.admin-nav .admin-tab[data-target="usersTab"]'));
     await refreshUsers();
 }
 
 function closeAdminPanel() {
-    document.getElementById('adminModal').style.display = 'none';
+    const overlay = document.getElementById('adminModal');
+    overlay.style.display = 'none';
 }
 
 function showUsersTab() {
@@ -2196,10 +2371,109 @@ function showUsersTab() {
 function showStatsTab() {
     document.getElementById('usersTab').style.display = 'none';
     document.getElementById('statsTab').style.display = 'block';
+    document.getElementById('achievementsAdminTab').style.display = 'none';
     document.querySelectorAll('.admin-tab').forEach(tab => tab.classList.remove('active'));
     document.querySelectorAll('.admin-tab')[1].classList.add('active');
     loadStats();
 }
+
+function showAchievementsAdminTab() {
+    document.getElementById('usersTab').style.display = 'none';
+    document.getElementById('statsTab').style.display = 'none';
+    document.getElementById('achievementsAdminTab').style.display = 'block';
+    document.querySelectorAll('.admin-tab').forEach(tab => tab.classList.remove('active'));
+    document.querySelectorAll('.admin-tab')[2].classList.add('active');
+    refreshAchievementDefs();
+}
+
+// New unified switching
+function switchAdminSection(btn) {
+    if (!btn) return;
+    const targetId = btn.getAttribute('data-target');
+    document.querySelectorAll('.admin-nav .admin-tab').forEach(t=>t.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.admin-section').forEach(sec => {
+        if (sec.id === targetId) sec.classList.add('active'); else sec.classList.remove('active');
+    });
+    if (targetId === 'usersTab') {
+        refreshUsers();
+    } else if (targetId === 'statsTab') {
+        loadStats();
+    } else if (targetId === 'achievementsAdminTab') {
+        refreshAchievementDefs();
+    }
+}
+
+async function refreshAchievementDefs() {
+    const list = document.getElementById('achievementDefsList');
+    list.innerHTML = '<div class="loading">Loading...</div>';
+    try {
+        const r = await fetch('/api/achievements/config');
+        const data = await r.json();
+        const defs = data.achievements || [];
+        if (!defs.length) { list.innerHTML = '<div class="empty">No achievements</div>'; return; }
+        list.innerHTML = '';
+        defs.forEach(d => {
+            const card = document.createElement('div');
+            card.className = 'ach-card';
+            card.innerHTML = `
+                <div class="ach-main">
+                    <span class="ach-icon">${d.icon}</span>
+                    <div class="ach-text">
+                        <div class="ach-name">${d.name} <span class="ach-id">(${d.id})</span></div>
+                        <div class="ach-desc">${d.desc}</div>
+                        <div class="ach-cond">${d.condition.type} ≥ ${d.condition.value} ${d.tier ? '• '+d.tier : ''}</div>
+                    </div>
+                </div>
+                <div class="ach-actions">
+                    <button onclick="editAchievementDef('${d.id}')" class="mini-btn">Edit</button>
+                    <button onclick="deleteAchievementDef('${d.id}')" class="mini-btn danger">Del</button>
+                </div>`;
+            list.appendChild(card);
+        });
+    } catch(e) { list.innerHTML = '<div class="error">Error loading</div>'; }
+}
+
+function openNewAchievementForm() {
+    document.getElementById('achievementEditor').style.display='block';
+    document.getElementById('achEditorTitle').textContent='New Achievement';
+    ['achId','achIcon','achName','achTier','achDesc','achCondValue'].forEach(id => { const el=document.getElementById(id); if(el) el.value = (id==='achCondValue'?1:''); });
+    document.getElementById('achCondType').value='pixels';
+}
+function closeAchievementEditor(){ document.getElementById('achievementEditor').style.display='none'; }
+
+async function editAchievementDef(id){
+    const r = await fetch('/api/achievements/config');
+    const data = await r.json();
+    const d = (data.achievements||[]).find(a=>a.id===id); if(!d) return;
+    openNewAchievementForm();
+    document.getElementById('achEditorTitle').textContent='Edit Achievement';
+    document.getElementById('achId').value = d.id;
+    document.getElementById('achId').readOnly = true;
+    document.getElementById('achIcon').value = d.icon;
+    document.getElementById('achName').value = d.name;
+    document.getElementById('achTier').value = d.tier || '';
+    document.getElementById('achDesc').value = d.desc;
+    document.getElementById('achCondType').value = d.condition.type;
+    document.getElementById('achCondValue').value = d.condition.value;
+}
+
+async function saveAchievementDef(){
+    const payload = {
+        id: document.getElementById('achId').value.trim(),
+    icon: normalizeAchievementIcon(document.getElementById('achIcon').value.trim()) || 'emoji_events',
+        name: document.getElementById('achName').value.trim(),
+        desc: document.getElementById('achDesc').value.trim(),
+        tier: document.getElementById('achTier').value.trim() || null,
+        condition: { type: document.getElementById('achCondType').value, value: parseInt(document.getElementById('achCondValue').value,10) }
+    };
+    const res = await fetch('/api/achievements/admin/upsert', { method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`}, body: JSON.stringify(payload)});
+    if(res.ok){ closeAchievementEditor(); refreshAchievementDefs(); loadAchievementsConfig(); } else { alert('Save failed'); }
+}
+async function deleteAchievementDef(id){ if(!confirm('Delete achievement '+id+'?')) return; const r= await fetch('/api/achievements/admin/'+id,{method:'DELETE', headers:{'Authorization':`Bearer ${authToken}`}}); if(r.ok){ refreshAchievementDefs(); loadAchievementsConfig(); } }
+
+function exportAchievementDefs(){ fetch('/api/achievements/config').then(r=>r.json()).then(d=>{ const blob=new Blob([JSON.stringify(d.achievements||[],null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='achievements_export.json'; a.click(); }); }
+function importAchievementDefs(evt){ const file=evt.target.files[0]; if(!file) return; const reader=new FileReader(); reader.onload=async (e)=>{ try { const arr=JSON.parse(e.target.result); const r= await fetch('/api/achievements/admin/import',{method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`}, body: JSON.stringify({ achievements: arr, replace:false })}); if(r.ok){ refreshAchievementDefs(); loadAchievementsConfig(); } else alert('Import failed'); } catch(err){ alert('Invalid JSON'); } }; reader.readAsText(file); }
 
 async function refreshUsers() {
     try {
@@ -2438,7 +2712,7 @@ function createBulkSuccessAnimation(placed, total) {
     const successNotification = document.createElement('div');
     successNotification.innerHTML = `
         <div style="display: flex; align-items: center; gap: 12px;">
-            <span style="font-size: 24px; animation: bounce 0.6s ease-in-out;">🎉</span>
+            <span class="material-symbols-rounded" style="font-size: 28px; animation: bounce 0.6s ease-in-out;">celebration</span>
             <div>
                 <div style="font-weight: bold; font-size: 16px;">BULK COMPLETE!</div>
                 <div style="font-size: 12px; opacity: 0.9;">${placed}/${total} pixels placed</div>
@@ -2462,7 +2736,7 @@ function createBulkSuccessAnimation(placed, total) {
         box-shadow: 0 8px 32px rgba(34, 197, 94, 0.4);
         backdrop-filter: blur(10px);
         border: 2px solid rgba(255,255,255,0.3);
-        animation: successPop 2s ease-out forwards;
+    animation: successPop 5s ease-out forwards;
     `;
     document.body.appendChild(successNotification);
     
@@ -2472,18 +2746,11 @@ function createBulkSuccessAnimation(placed, total) {
         styleSheet.id = 'successAnimations';
         styleSheet.textContent = `
             @keyframes successPop {
-                0% {
-                    opacity: 0;
-                    transform: translate(-50%, -50%) scale(0);
-                }
-                20% {
-                    opacity: 1;
-                    transform: translate(-50%, -50%) scale(1.1);
-                }
-                100% {
-                    opacity: 0;
-                    transform: translate(-50%, -50%) scale(0.8);
-                }
+                0% { opacity: 0; transform: translate(-50%, -50%) scale(0); }
+                12% { opacity: 1; transform: translate(-50%, -50%) scale(1.08); }
+                18% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+                78% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+                100% { opacity: 0; transform: translate(-50%, -50%) scale(0.9); }
             }
             
             @keyframes confettiFall {
@@ -2525,7 +2792,7 @@ function createBulkSuccessAnimation(placed, total) {
         if (successNotification.parentNode) {
             successNotification.remove();
         }
-    }, 4000);
+    }, 6500);
 }
 
 // ==================== TUTORIAL SYSTEM ====================
@@ -2627,39 +2894,198 @@ function loadProfileData() {
     }
 }
 
-function updateAchievements() {
-    const achievements = document.querySelectorAll('.achievement');
-    
-    // First Pixel achievement
-    if (pixelsPlacedCount > 0) {
-        achievements[0].classList.remove('locked');
-        achievements[0].classList.add('unlocked');
-    }
-    
-    // On Fire achievement (100 pixels)
-    if (pixelsPlacedCount >= 100) {
-        achievements[1].classList.remove('locked');
-        achievements[1].classList.add('unlocked');
-    }
-    
-    // Bulk Master achievement (you'd track this)
-    if (bulkPlacementsCount >= 10) {
-        achievements[2].classList.remove('locked');
-        achievements[2].classList.add('unlocked');
-    }
-    
-    // Social Artist achievement (you'd track this)
-    if (chatMessagesCount >= 50) {
-        achievements[3].classList.remove('locked');
-        achievements[3].classList.add('unlocked');
-    }
-}
+// Legacy updateAchievements replaced by new evaluate/render system.
+function updateAchievements() { renderAchievementsGrid(); evaluateAndUnlockAchievements(); }
 
 // Track statistics for achievements
 let pixelsPlacedCount = 0;
 let bulkPlacementsCount = 0;
 let chatMessagesCount = 0;
 let sessionStartTime = Date.now();
+
+// ==================== ACHIEVEMENTS SYSTEM ====================
+// Backend authoritative configuration fetched at runtime
+let ACHIEVEMENTS_CONFIG = [];
+let achievementsConfigLoaded = false;
+// Map legacy emoji to Material Symbols names
+const LEGACY_ICON_MAP = {
+    '🎯':'my_location', '⚡':'bolt', '💬':'chat', '🎨':'palette', '⏱️':'timer', '💰':'savings', '📅':'calendar_month', '🏆':'emoji_events', '🎉':'celebration'
+};
+function normalizeAchievementIcon(raw){
+    if(!raw) return '';
+    if(LEGACY_ICON_MAP[raw]) return LEGACY_ICON_MAP[raw];
+    // If user already entered a material symbol name keep it (heuristic: no spaces and length <40)
+    if(/^[a-z0-9_]{2,40}$/.test(raw)) return raw;
+    return raw; // fallback text (will render as plain)
+}
+async function loadAchievementsConfig() {
+    try {
+        const resp = await fetch('/api/achievements/config');
+        if (!resp.ok) throw new Error('Failed config fetch');
+        const data = await resp.json();
+        ACHIEVEMENTS_CONFIG = data.achievements || [];
+        achievementsConfigLoaded = true;
+        renderAchievementsGrid();
+        scheduleAchievementEvaluation();
+    } catch (e) {
+        console.warn('Failed to load achievements config', e);
+    }
+}
+
+// Track unlocked achievements in memory + localStorage persistence per user
+let unlockedAchievements = new Set();
+function loadUnlockedAchievements() {
+    if (!currentUsername) return;
+    try {
+        const raw = localStorage.getItem(`achievements_${currentUsername}`);
+        if (raw) {
+            unlockedAchievements = new Set(JSON.parse(raw));
+        }
+    } catch (e) { console.warn('Failed to load achievements', e); }
+}
+function persistUnlockedAchievements() {
+    if (!currentUsername) return;
+    try { localStorage.setItem(`achievements_${currentUsername}`, JSON.stringify(Array.from(unlockedAchievements))); } catch (e) {}
+}
+
+function evaluateAchievementCondition(cfg) {
+    const { type, value } = cfg.condition;
+    switch (type) {
+        case 'pixels': return pixelsPlacedCount >= value;
+        case 'bulk_uses': return bulkPlacementsCount >= value;
+        case 'chat_messages': return chatMessagesCount >= value;
+        case 'session_minutes': return ((Date.now() - sessionStartTime) / 60000) >= value;
+        default:
+            if (typeof cfg.condition.predicate === 'function') {
+                try { return cfg.condition.predicate(); } catch { return false; }
+            }
+            return false;
+    }
+}
+
+function renderAchievementsGrid() {
+    const grid = document.getElementById('achievementsGrid');
+    if (!grid) return;
+    // Only rebuild if counts mismatch
+    grid.innerHTML = '';
+    ACHIEVEMENTS_CONFIG.forEach(cfg => {
+        const unlocked = unlockedAchievements.has(cfg.id) || evaluateAchievementCondition(cfg);
+        const div = document.createElement('div');
+        div.className = `achievement ${unlocked ? 'unlocked' : 'locked'}`;
+        div.dataset.achievementId = cfg.id;
+        const iconName = normalizeAchievementIcon(cfg.icon);
+        let iconHtml;
+        if(iconName && /^[a-z0-9_]{2,40}$/.test(iconName)) {
+            iconHtml = `<span class="material-symbols-rounded">${iconName}</span>`;
+        } else {
+            iconHtml = `<span>${cfg.icon||''}</span>`;
+        }
+        div.innerHTML = `
+            <div class="achievement-icon">${iconHtml}</div>
+            <div class="achievement-name">${cfg.name}</div>
+            <div class="achievement-desc">${cfg.desc}</div>
+        `;
+        grid.appendChild(div);
+    });
+}
+
+function showAchievementToast(cfg) {
+    const container = document.getElementById('achievementToasts');
+    if (!container) return;
+    const toast = document.createElement('div');
+    const tierClass = cfg.tier === 'epic' ? 'epic' : (cfg.tier === 'new-tier' ? 'new-tier' : '');
+    toast.className = `achievement-toast ${tierClass}`;
+    const iconName = normalizeAchievementIcon(cfg.icon);
+    const iconHtml = iconName && /^[a-z0-9_]{2,40}$/.test(iconName) ? `<span class="material-symbols-rounded icon-inline">${iconName}</span>` : `<span>${cfg.icon||''}</span>`;
+    toast.innerHTML = `
+        <h5>${iconHtml} Achievement Unlocked!</h5>
+        <p><strong>${cfg.name}</strong><br>${cfg.desc}</p>
+        <div class="achievement-progress-bar"><div class="achievement-progress-fill"></div></div>
+    `;
+    container.appendChild(toast);
+    setTimeout(() => {
+        if (toast.parentNode) toast.remove();
+    }, 7000);
+}
+
+let achievementEvaluationScheduled = false;
+function scheduleAchievementEvaluation() {
+    if (achievementEvaluationScheduled) return;
+    achievementEvaluationScheduled = true;
+    requestAnimationFrame(() => {
+        achievementEvaluationScheduled = false;
+        evaluateAndUnlockAchievements();
+    });
+}
+
+function evaluateAndUnlockAchievements() {
+    if (!achievementsConfigLoaded) return;
+    // Server authoritative: ask server to evaluate pixel/chat achievements (security)
+    // Still do local optimistic evaluation for immediate feedback (e.g., bulk/session) then reconcile.
+    let newlyUnlocked = [];
+    ACHIEVEMENTS_CONFIG.forEach(cfg => {
+        if (!unlockedAchievements.has(cfg.id) && evaluateAchievementCondition(cfg)) {
+            unlockedAchievements.add(cfg.id);
+            newlyUnlocked.push(cfg);
+        }
+    });
+    if (newlyUnlocked.length > 0) {
+        persistUnlockedAchievements();
+        renderAchievementsGrid();
+        newlyUnlocked.forEach(showAchievementToast);
+    }
+    if (authToken && currentUsername) {
+        // Ask backend to evaluate authoritative unlocks
+    fetch('/api/achievements/evaluate', { method: 'POST', headers: { 'Authorization': `Bearer ${authToken}` } })
+            .then(r => r.json())
+            .then(data => {
+                const all = data.all || [];
+                let added = [];
+                all.forEach(id => {
+                    if (!unlockedAchievements.has(id)) {
+                        unlockedAchievements.add(id);
+                        const cfg = ACHIEVEMENTS_CONFIG.find(c => c.id === id);
+                        if (cfg) added.push(cfg);
+                    }
+                });
+                if (added.length) {
+                    persistUnlockedAchievements();
+                    renderAchievementsGrid();
+                    added.forEach(showAchievementToast);
+                }
+                // Sync sanitized list back (server already validated on evaluate)
+                fetch('/api/achievements/sync', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` }, body: JSON.stringify({ achievements: Array.from(unlockedAchievements) }) }).catch(()=>{});
+            })
+            .catch(()=>{});
+    }
+}
+
+// Hook into existing counters updates (pixel placement, bulk completion, chat send)
+// We already increment counts in pixel_update and bulk_complete handlers.
+// After each increment we schedule evaluation (minimal overhead).
+// We'll patch those increments below by wrapping increment logic.
+
+// Patch helper: wrap a function to schedule evaluation (if needed later)
+function achievementCountChanged() { scheduleAchievementEvaluation(); }
+
+// Periodic evaluation for time-based achievements
+setInterval(() => { scheduleAchievementEvaluation(); }, 60000); // every minute
+
+// When user logs in / username set load achievements
+// Will be called after auth success externally once username known (add safe polling)
+setInterval(() => { if (currentUsername && unlockedAchievements.size === 0) { loadUnlockedAchievements(); renderAchievementsGrid(); scheduleAchievementEvaluation(); } }, 2000);
+
+// Fetch config early
+loadAchievementsConfig();
+
+// Optional: expose global stats fetcher for console/testing
+window.fetchAchievementDistribution = function() {
+    if (!authToken) { console.warn('Not authenticated'); return; }
+    fetch('/api/achievements/distribution', { headers: { 'Authorization': `Bearer ${authToken}` }})
+        .then(r => r.json())
+        .then(d => { console.log('🌐 Achievement Distribution', d); })
+        .catch(e => console.error('Failed to load distribution', e));
+};
 
 // Show tutorial on first visit
 window.addEventListener('load', () => {

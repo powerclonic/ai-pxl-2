@@ -187,25 +187,34 @@ class RegionManager:
         
         # Re-get user after refill
         authenticated_user = auth_service.get_user_by_username(user_id)
-        
-        # Check if user has pixels in database
+        # Check if user has pixels in database (server authoritative guard)
         if authenticated_user.pixel_bag_size < 1:
             await self.send_to_user(user_id, {
                 "type": MessageType.ERROR.value,
                 "message": "No pixels available! Wait for bag to refill."
             })
             return False
-        
-                # Place the pixel
-        if not await self.canvas_service.place_pixel(x, y, color, user_id):
-            return False
-        
-        # Consume a pixel from database and update stats
+        # ============ ATOMIC-ish CONSUMPTION ============
+        # Decrement first, attempt placement, rollback on failure.
+        # (Single-threaded event loop drastically reduces race conditions; this avoids
+        # a window where a failed placement still lets user keep pixel but others saw canvas change.)
         authenticated_user.pixel_bag_size -= 1
+        consume_time = datetime.now()
+        try:
+            placed = await self.canvas_service.place_pixel(x, y, color, user_id)
+        except Exception as e:
+            placed = False
+            print(f"❌ Error placing pixel for {user_id} at ({x},{y}): {e}")
+        if not placed:
+            # Rollback consumption
+            authenticated_user.pixel_bag_size += 1
+            # Do NOT update last_pixel_placed_at on failure
+            auth_service._save_users()
+            return False
+
+        # Successful placement: finalize stats
         authenticated_user.total_pixels_placed += 1
-        authenticated_user.last_pixel_placed_at = datetime.now()
-        
-        # Save to database immediately
+        authenticated_user.last_pixel_placed_at = consume_time
         auth_service._save_users()
         
         print(f"📊 User {user_id} placed a pixel! DB Bag: {authenticated_user.pixel_bag_size}/{authenticated_user.max_pixel_bag_size}")

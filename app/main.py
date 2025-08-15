@@ -9,6 +9,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.core.config import settings
 from app.services import RegionManager
+from app.db.database import init_infrastructure
 from app.api import create_api_router, websocket_endpoint
 from app.api.auth import router as auth_router
 
@@ -20,6 +21,7 @@ async def lifespan(app: FastAPI):
     """Manage application lifespan events"""
     # Startup
     print("Starting Pixel Canvas Server...")
+    await init_infrastructure()
     await region_manager.initialize()
     print("Region manager initialized successfully")
     

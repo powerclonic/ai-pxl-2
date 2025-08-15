@@ -1,6 +1,8 @@
 """
 Configuration settings for the Pixel Canvas application.
 """
+import os
+
 class Settings:
     """Application settings"""
     
@@ -47,6 +49,16 @@ class Settings:
     # Static files
     STATIC_DIR: str = "static"
     TEMPLATES_DIR: str = "templates"
+
+    # --- Persistence / Infra (env overridable) ---
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/app.db")
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    ENABLE_REDIS: bool = os.getenv("ENABLE_REDIS", "true").lower() == "true"
+    DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", "10"))
+    DB_POOL_MAX_OVERFLOW: int = int(os.getenv("DB_POOL_MAX_OVERFLOW", "20"))
+    METRICS_FLUSH_INTERVAL_MS: int = int(os.getenv("METRICS_FLUSH_INTERVAL_MS", "3000"))
+    CANVAS_SNAPSHOT_INTERVAL_SEC: int = int(os.getenv("CANVAS_SNAPSHOT_INTERVAL_SEC", "300"))
+    CANVAS_SNAPSHOT_RETENTION: int = int(os.getenv("CANVAS_SNAPSHOT_RETENTION", "50"))
 
 # Global settings instance
 settings = Settings()

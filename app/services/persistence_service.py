@@ -10,7 +10,11 @@ from app.models.models import AuthenticatedUser, UserRole
 from app.core.config import settings
 
 class PersistenceService:
-    """Handles saving and loading of user data and game state"""
+    """LEGACY: File-based persistence retained only for bootstrap/migration fallback.
+
+    Users and achievements now stored in the database; stats counters via Redis/DB.
+    Canvas handled by CanvasPersistence (Parquet). Avoid adding new logic here.
+    """
     
     def __init__(self):
         self.data_dir = "data"
@@ -99,32 +103,11 @@ class PersistenceService:
             print(f"Error loading users: {e}")
             return {}
     
-    def save_stats(self, stats: dict) -> bool:
-        """Save general statistics"""
-        try:
-            with open(self.stats_file, 'w') as f:
-                json.dump(stats, f, indent=2)
-            return True
-        except Exception as e:
-            print(f"Error saving stats: {e}")
-            return False
+    def save_stats(self, stats: dict) -> bool:  # Deprecated
+        return False
     
-    def load_stats(self) -> dict:
-        """Load general statistics"""
-        try:
-            if not os.path.exists(self.stats_file):
-                return {
-                    'total_pixels_placed': 0,
-                    'total_users_registered': 0,
-                    'total_messages_sent': 0,
-                    'server_start_time': datetime.now().isoformat()
-                }
-            
-            with open(self.stats_file, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Error loading stats: {e}")
-            return {}
+    def load_stats(self) -> dict:  # Deprecated
+        return {}
     
     def backup_canvas_data(self, canvas_data: dict) -> bool:
         """Backup canvas data"""

@@ -104,14 +104,15 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, region_manager:
                     print(f"📦 Sent pixel bag update from DB: {updated_user.pixel_bag_size}/{updated_user.max_pixel_bag_size}")
             
             elif message_type == MessageType.BULK_PIXEL_PLACE.value:
-                # Handle bulk pixel placement
+                # Handle bulk pixel placement with dynamic refill awareness
                 pixels = message.get("pixels", [])
                 if not pixels:
                     continue
-                
+
                 print(f"🚀 DEBUG: Bulk placing {len(pixels)} pixels for user: {authenticated_user.username}")
-                
-                # Get current user state
+
+                # Always refill before bulk attempt to capture recent time-based gains
+                auth_service.refill_user_pixels(authenticated_user.username)
                 current_user = auth_service.get_user_by_username(authenticated_user.username)
                 if not current_user:
                     await websocket.send_text(json.dumps({
@@ -119,63 +120,89 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, region_manager:
                         "message": "User not found"
                     }))
                     continue
-                
-                available_pixels = current_user.pixel_bag_size
-                print(f"💰 User has {available_pixels} pixels available for {len(pixels)} requested")
-                
-                # Process as many pixels as possible (up to available amount)
-                pixels_to_process = pixels[:available_pixels] if len(pixels) > available_pixels else pixels
-                print(f"📦 Processing {len(pixels_to_process)} pixels (requested: {len(pixels)}, available: {available_pixels})")
-                
-                # CONSUME ALL PIXELS AT ONCE before placing any
-                if len(pixels_to_process) > 0:
-                    current_user.pixel_bag_size -= len(pixels_to_process)
-                    current_user.total_pixels_placed += len(pixels_to_process)
-                    current_user.last_pixel_placed_at = datetime.now()
-                    auth_service._save_users()
-                    print(f"💰 PRE-CONSUMED {len(pixels_to_process)} pixels. Bag now: {current_user.pixel_bag_size}")
-                
-                # Place all processable pixels (without individual pixel bag checks)
+
+                starting_available = current_user.pixel_bag_size
+                print(f"PIXEL BAG (start bulk): {starting_available}/{current_user.max_pixel_bag_size}")
+
                 successful_placements = 0
-                for pixel in pixels_to_process:
+                attempted = 0
+                batch_updates = []  # accumulate pixel updates for single broadcast per region set
+                BULK_PERSIST_INTERVAL = 10  # save after every N successful placements
+                MAX_BULK_DURATION_MS = 3000  # safety cutoff
+                start_ms = time.time() * 1000
+                # Process pixels one-by-one so mid-bulk refills (from time) can be applied.
+                for pixel in pixels:
+                    # Duration guard
+                    if (time.time() * 1000 - start_ms) > MAX_BULK_DURATION_MS:
+                        print("⏱️ Bulk duration limit reached, stopping early")
+                        break
+                    # Refill opportunistically every N pixels (e.g., each loop; cost low) to capture time passage
+                    auth_service.refill_user_pixels(authenticated_user.username)
+                    current_user = auth_service.get_user_by_username(authenticated_user.username)
+                    if current_user.pixel_bag_size <= 0:
+                        break  # Can't place more
+                    # Consume first (atomic style) then attempt placement
+                    current_user.pixel_bag_size -= 1
+                    consume_time = datetime.now()
+                    attempted += 1
+                    placed_ok = False
                     try:
-                        # Place directly on canvas without pixel bag validation
-                        if await region_manager.canvas_service.place_pixel(pixel["x"], pixel["y"], pixel["color"], authenticated_user.username):
-                            successful_placements += 1
-                            
-                            # Broadcast pixel update manually
-                            region_coords = region_manager.canvas_service.get_region_coords(pixel["x"], pixel["y"])
-                            await region_manager.broadcast_to_region(region_coords[0], region_coords[1], {
-                                "type": MessageType.PIXEL_UPDATE.value,
-                                "x": pixel["x"],
-                                "y": pixel["y"],
-                                "color": pixel["color"],
-                                "user_id": authenticated_user.username,
-                                "timestamp": time.time()
-                            })
+                        placed_ok = await region_manager.canvas_service.place_pixel(pixel["x"], pixel["y"], pixel["color"], authenticated_user.username)
                     except Exception as e:
                         print(f"❌ Error placing bulk pixel at ({pixel['x']}, {pixel['y']}): {e}")
-                
-                print(f"✅ Successfully placed {successful_placements}/{len(pixels_to_process)} bulk pixels")
-                
-                # Send updated pixel bag
-                updated_user = auth_service.get_user_by_username(authenticated_user.username)
-                if updated_user:
-                    await websocket.send_text(json.dumps({
-                        "type": "pixel_bag_update",
-                        "pixel_bag_size": updated_user.pixel_bag_size,
-                        "max_pixel_bag_size": updated_user.max_pixel_bag_size
-                    }))
-                    
-                    # Send bulk completion notification with more info
-                    await websocket.send_text(json.dumps({
-                        "type": "bulk_complete",
-                        "placed": successful_placements,
-                        "total": len(pixels),
-                        "requested": len(pixels),
-                        "available_at_start": available_pixels,
-                        "processed": len(pixels_to_process)
-                    }))
+                    if placed_ok:
+                        successful_placements += 1
+                        current_user.total_pixels_placed += 1
+                        current_user.last_pixel_placed_at = consume_time
+                        batch_updates.append({
+                            "x": pixel["x"],
+                            "y": pixel["y"],
+                            "color": pixel["color"],
+                            "user_id": authenticated_user.username,
+                            "timestamp": time.time()
+                        })
+                    else:
+                        # Rollback pixel if placement failed
+                        current_user.pixel_bag_size += 1
+                    # Persist after each pixel to keep authoritative state (could batch optimize)
+                    if successful_placements % BULK_PERSIST_INTERVAL == 0:
+                        auth_service._save_users()
+
+                # Final save if needed
+                auth_service._save_users()
+
+                ending_available = current_user.pixel_bag_size
+                print(f"✅ Bulk done. Placed {successful_placements}/{attempted} (requested {len(pixels)}). Bag now {ending_available}")
+
+                # Broadcast batch updates grouped by regions (single message per region set)
+                if batch_updates:
+                    # Determine all distinct regions touched
+                    regions_map = {}
+                    for upd in batch_updates:
+                        region_coords = region_manager.canvas_service.get_region_coords(upd["x"], upd["y"])
+                        regions_map.setdefault(region_coords, []).append(upd)
+                    for (rx, ry), updates in regions_map.items():
+                        await region_manager.broadcast_to_region(rx, ry, {
+                            "type": MessageType.PIXEL_BATCH_UPDATE.value,
+                            "updates": updates
+                        })
+
+                # Also send to the initiating client their bag + completion summary
+                await websocket.send_text(json.dumps({
+                    "type": "pixel_bag_update",
+                    "pixel_bag_size": ending_available,
+                    "max_pixel_bag_size": current_user.max_pixel_bag_size
+                }))
+                await websocket.send_text(json.dumps({
+                    "type": "bulk_complete",
+                    "placed": successful_placements,
+                    "total": len(pixels),
+                    "requested": len(pixels),
+                    "available_at_start": starting_available,
+                    "attempted": attempted,
+                    "remaining": ending_available,
+                    "duration_ms": int(time.time()*1000 - start_ms)
+                }))
             
             elif message_type == MessageType.CHAT_MESSAGE.value:
                 # Check rate limiting for chat

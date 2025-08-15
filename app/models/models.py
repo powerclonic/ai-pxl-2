@@ -45,6 +45,13 @@ class AuthenticatedUser:
     display_name: Optional[str] = None
     chat_color: str = "#55aaff"
 
+    # Convenience helpers
+    def is_admin(self) -> bool:
+        return self.role == UserRole.ADMIN and not self.is_banned
+
+    def is_banned_user(self) -> bool:
+        return self.is_banned or self.role == UserRole.BANNED
+
 @dataclass
 class CaptchaChallenge:
     """CAPTCHA challenge for bot protection"""

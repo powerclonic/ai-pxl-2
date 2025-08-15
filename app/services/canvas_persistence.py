@@ -257,3 +257,7 @@ class CanvasPersistence:
             }
         }
         return stats
+
+    async def enforce_retention(self):
+        """Placeholder retention: currently single snapshot file so nothing to prune."""
+        return
