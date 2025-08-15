@@ -205,6 +205,25 @@ class AchievementService:
             if ok:
                 if auth_service.unlock_achievement(username, ach.id):
                     newly_unlocked.append(ach.id)
+                    # Reward economy: coins + XP scaled by tier
+                    try:
+                        from app.services.xp_service import xp_service
+                        tier = (ach.tier or '').lower()
+                        coin_reward = 25
+                        xp_reward = 20
+                        if tier == 'hard':
+                            coin_reward, xp_reward = 60, 50
+                        elif tier == 'epic':
+                            coin_reward, xp_reward = 120, 100
+                        elif tier == 'legendary':
+                            coin_reward, xp_reward = 250, 220
+                        u = auth_service.get_user_by_username(username)
+                        if u:
+                            u.coins = getattr(u, 'coins', 0) + coin_reward
+                            xp_service.add_xp(username, xp_reward)
+                            auth_service._save_user(username)
+                    except Exception as e:
+                        print(f"⚠️ Failed granting achievement rewards: {e}")
         return newly_unlocked
 
     def validate_ids(self, ids: List[str]) -> List[str]:

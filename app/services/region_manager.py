@@ -209,27 +209,89 @@ class RegionManager:
             # Rollback consumption
             authenticated_user.pixel_bag_size += 1
             # Do NOT update last_pixel_placed_at on failure
-            auth_service._save_users()
+            auth_service.enqueue_dirty(user_id)
             return False
 
-        # Successful placement: finalize stats
+        # Successful placement: finalize stats & rewards
         authenticated_user.total_pixels_placed += 1
-        authenticated_user.last_pixel_placed_at = consume_time
-        auth_service._save_users()
-        
+        authenticated_user.last_pixel_placed_at = consume_time  # Do NOT touch last_bag_refill_at here
+        # Increment coins (simple baseline economy) and small XP drip
+        try:
+            from app.services.xp_service import xp_service
+            # Diminishing rewards window (per 60s) - relaxed version
+            WINDOW = 60  # time window in seconds
+            BASE_COIN = 1
+            BASE_XP = 1
+            SOFT_CAP = 120   # full rewards up to this many actions in window
+            HARD_CAP = 400   # decay ends here
+            FLOOR = 0.25     # minimum scaling after hard cap
+            now_dt = datetime.now()
+            if not authenticated_user.reward_window_start or (now_dt - authenticated_user.reward_window_start).total_seconds() > WINDOW:
+                authenticated_user.reward_window_start = now_dt
+                authenticated_user.reward_actions_in_window = 0
+            authenticated_user.reward_actions_in_window += 1
+            # After 50 actions in window scale down linearly to 0 at 200
+            actions = authenticated_user.reward_actions_in_window
+            if actions <= SOFT_CAP:
+                scale = 1.0
+            elif actions <= HARD_CAP:
+                # linear interpolation towards FLOOR
+                frac = (actions - SOFT_CAP) / (HARD_CAP - SOFT_CAP)
+                scale = 1.0 - frac * (1.0 - FLOOR)
+            else:
+                scale = FLOOR
+            # Decide discrete rewards (less aggressive: still award coins while scale >= 0.25, XP while >= 0.10)
+            coin_gain = 1 if scale >= 0.25 else 0
+            xp_gain = 1 if scale >= 0.10 else 0
+            if coin_gain:
+                authenticated_user.coins = getattr(authenticated_user, 'coins', 0) + coin_gain
+            if xp_gain:
+                xp_service.add_xp(user_id, xp_gain)
+        except Exception as e:
+            print(f"⚠️ Reward grant failed for pixel placement: {e}")
+        # Batch persistence enqueue instead of full save
+        auth_service.enqueue_dirty(user_id)
+
         print(f"📊 User {user_id} placed a pixel! DB Bag: {authenticated_user.pixel_bag_size}/{authenticated_user.max_pixel_bag_size}")
         
         # Broadcast pixel update to all users in ALL regions where the placer is connected
         # This ensures users in adjacent regions also see the pixel update
         pixel_region_coords = self.canvas_service.get_region_coords(x, y)
+        # Try to infer effect server-side (color item payload may define 'effect')
+        inferred_effect = None
+        try:
+            from app.services.loot_box_service import loot_box_service
+            # Build a mapping color->effect for user's owned color items
+            user_effect_colors = []
+            user = self.user_service.get_user(user_id)
+            if user:
+                for cid in getattr(user, 'owned_colors', []) or []:
+                    item = loot_box_service.get_item(cid)
+                    if item and item.payload and item.payload.get('color') and item.payload.get('effect'):
+                        if item.payload.get('color').lower() == color.lower():
+                            inferred_effect = item.payload.get('effect')
+                            break
+        except Exception as e:
+            print(f"⚠️ Failed inferring effect for color {color}: {e}")
+
         pixel_update_message = {
             "type": MessageType.PIXEL_UPDATE.value,
             "x": x,
             "y": y,
             "color": color,
+            "effect": inferred_effect,
             "user_id": user_id,
             "timestamp": current_time
         }
+        # Add economy snapshot for client sync (lightweight)
+        pixel_update_message.update({
+            "coins": getattr(authenticated_user, 'coins', 0),
+            "experience_points": getattr(authenticated_user, 'experience_points', 0),
+            "user_level": getattr(authenticated_user, 'user_level', 1),
+            "xp_to_next": getattr(authenticated_user, 'xp_to_next_cache', 0),
+            "pixel_bag_size": authenticated_user.pixel_bag_size,
+            "max_pixel_bag_size": authenticated_user.max_pixel_bag_size
+        })
         
         # Get all regions where this user is connected
         user_connected_regions = self.user_regions.get(user_id, set())
@@ -270,14 +332,23 @@ class RegionManager:
         if len(region_chat) > settings.MAX_CHAT_HISTORY_PER_REGION:
             region_chat.pop(0)
         
-        # Get user data for enhanced chat display
+        # Reward message (simple baseline: 1 coin + 1 xp)
         authenticated_user = auth_service.get_user_by_username(user_id)
+        if authenticated_user:
+            try:
+                from app.services.xp_service import xp_service
+                authenticated_user.coins = getattr(authenticated_user, 'coins', 0) + 1
+                xp_service.add_xp(user_id, 1)
+            except Exception as e:
+                print(f"⚠️ Chat reward grant failed: {e}")
+        # Get user data for enhanced chat display (after reward)
         user_data = {
             "username": user_id,
             "level": authenticated_user.user_level if authenticated_user else 1,
             "role": authenticated_user.role.value if authenticated_user else "USER",
             "display_name": authenticated_user.display_name if authenticated_user else None,
-            "chat_color": authenticated_user.chat_color if authenticated_user else "#55aaff"
+            "chat_color": authenticated_user.chat_color if authenticated_user else "#55aaff",
+            "coins": getattr(authenticated_user, 'coins', 0) if authenticated_user else 0
         }
         
         # Broadcast to region

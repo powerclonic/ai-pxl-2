@@ -35,15 +35,29 @@ class AuthenticatedUser:
     total_messages_sent: int = 0
     total_login_time_seconds: int = 0
     last_pixel_placed_at: Optional[datetime] = None
+    # Independent refill anchor for pixel bag regeneration (previously reused last_pixel_placed_at causing stalls when idle)
+    last_bag_refill_at: Optional[datetime] = field(default_factory=datetime.now)
     last_message_sent_at: Optional[datetime] = None
     user_level: int = 1
     experience_points: int = 0
     achievements: list = field(default_factory=list)
     preferences: dict = field(default_factory=dict)
+    # Economy / progression
+    coins: int = 0
+    premium_coins: int = 0  # future use
+    inventory: dict = field(default_factory=dict)  # generic item_id -> count / meta
+    owned_colors: list = field(default_factory=list)  # list of unlocked color IDs
+    owned_effects: list = field(default_factory=list)  # list of unlocked effect IDs
+    last_lootbox_open_at: Optional[datetime] = None
+    lootbox_opens: int = 0
+    xp_to_next_cache: int = 0  # cached threshold for current level
     
     # Chat customization
     display_name: Optional[str] = None
     chat_color: str = "#55aaff"
+    # Reward throttling state
+    reward_window_start: Optional[datetime] = None
+    reward_actions_in_window: int = 0
 
     # Convenience helpers
     def is_admin(self) -> bool:

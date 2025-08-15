@@ -95,6 +95,15 @@ class PersistenceService:
                 user_dict.setdefault('experience_points', 0)
                 user_dict.setdefault('achievements', [])
                 user_dict.setdefault('preferences', {})
+                # New economy / progression fields
+                user_dict.setdefault('coins', 0)
+                user_dict.setdefault('premium_coins', 0)
+                user_dict.setdefault('inventory', {})
+                user_dict.setdefault('owned_colors', [])
+                user_dict.setdefault('owned_effects', [])
+                user_dict.setdefault('last_lootbox_open_at', None)
+                user_dict.setdefault('lootbox_opens', 0)
+                user_dict.setdefault('xp_to_next_cache', 0)
                 
                 users[user_id] = AuthenticatedUser(**user_dict)
             

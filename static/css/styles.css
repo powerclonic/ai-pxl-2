@@ -47,6 +47,100 @@ body {
     position: relative;
 }
 
+/* Economy Bar */
+.economy-bar {
+    position: fixed;
+    top: 10px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 16px; align-items: center;
+    background: rgba(20,20,30,0.55);
+    padding: 8px 14px; border-radius: 40px;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 4px 20px -4px rgba(0,0,0,0.4);
+    z-index: 9000;
+    color: #fff;
+    font-size: 14px;
+}
+.economy-bar .eco-section { display:flex; align-items:center; gap:6px; }
+.economy-bar .xp-bar { width:120px; height:6px; background:rgba(255,255,255,0.15); border-radius:4px; overflow:hidden; }
+.economy-bar .xp-fill { height:100%; width:0%; background:linear-gradient(90deg,#4ade80,#16a34a); transition:width .4s ease; }
+.economy-bar .xp-text { font-size:11px; opacity:.8; margin-left:4px; }
+.economy-bar .loot-btn { background:linear-gradient(135deg,#6366f1,#8b5cf6); color:#fff; border:none; padding:6px 14px; border-radius:20px; cursor:pointer; font-weight:600; display:flex; align-items:center; gap:4px; }
+.economy-bar .loot-btn:hover { filter:brightness(1.1); }
+
+/* Loot Modal */
+.loot-modal { position:fixed; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,0.45); z-index:10050; }
+.loot-modal-content { width: min(600px,90%); background:rgba(30,30,45,0.85); backdrop-filter:blur(14px); border:1px solid rgba(255,255,255,0.1); border-radius:24px; padding:24px 28px 30px; color:#fff; font-family:inherit; position:relative; }
+.loot-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+.loot-close { background:none; border:none; font-size:26px; color:#fff; cursor:pointer; }
+.loot-boxes-list { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:14px; }
+.loot-box-card { background:rgba(255,255,255,0.08); padding:12px 12px 14px; border-radius:18px; position:relative; display:flex; flex-direction:column; gap:8px; border:1px solid rgba(255,255,255,0.12); }
+.loot-box-card { transition:transform .25s ease, box-shadow .25s ease, border-color .25s; cursor:pointer; }
+.loot-box-card:hover { transform:translateY(-4px); box-shadow:0 8px 24px -6px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,0.15); border-color:rgba(255,255,255,0.25); }
+.loot-box-card:active { transform:translateY(-1px) scale(.98); }
+.loot-box-card h4 { margin:0; font-size:15px; }
+.loot-opening-animation { position:relative; overflow:hidden; }
+.loot-opening-animation:before { content:""; position:absolute; inset:0; background:conic-gradient(from 0deg, rgba(255,255,255,0.1), transparent 40%, rgba(255,255,255,0.2)); animation:spin 2s linear infinite; mix-blend-mode:overlay; pointer-events:none; }
+@keyframes spin { 0% { transform:rotate(0deg);} 100% { transform:rotate(360deg);} }
+.loot-result { animation:fadeSlide .4s ease; }
+@keyframes fadeSlide { 0%{opacity:0; transform:translateY(8px);}100%{opacity:1; transform:translateY(0);} }
+.rarity-common-bg { background:linear-gradient(135deg,#1e293b,#334155); }
+.rarity-rare-bg { background:linear-gradient(135deg,#1e3a8a,#2563eb); }
+.rarity-epic-bg { background:linear-gradient(135deg,#4c1d95,#7e22ce); }
+.rarity-legendary-bg { background:linear-gradient(135deg,#92400e,#d97706); }
+.loot-box-card .price { font-size:12px; opacity:.75; display:flex; align-items:center; gap:4px; }
+.loot-box-card button { margin-top:auto; background:linear-gradient(135deg,#0ea5e9,#6366f1); border:none; color:#fff; padding:6px 10px; border-radius:14px; cursor:pointer; font-size:13px; font-weight:600; }
+.loot-box-card button:hover { filter:brightness(1.1); }
+.loot-result { margin-top:18px; padding:14px; background:rgba(0,0,0,0.3); border-radius:16px; font-size:14px; line-height:1.4; }
+
+/* Rarity Colors */
+.rarity-common { color:#d4d4d8; }
+.rarity-rare { color:#60a5fa; text-shadow:0 0 4px rgba(96,165,250,0.4); }
+.rarity-epic { color:#c084fc; text-shadow:0 0 6px rgba(192,132,252,0.5); }
+.rarity-legendary { color:#fbbf24; text-shadow:0 0 8px rgba(251,191,36,0.6),0 0 14px rgba(251,191,36,0.3); }
+
+/* Unlock Toast (reusing achievement container optional) */
+.item-unlock-toast { background:linear-gradient(135deg,#1e293b,#334155); color:#fff; padding:14px 18px; border-radius:18px; box-shadow:0 8px 30px -6px rgba(0,0,0,0.5); display:flex; flex-direction:column; gap:4px; animation:toastPop .5s ease; position:relative; overflow:hidden; }
+.item-unlock-toast.epic { border:1px solid #c084fc; }
+.item-unlock-toast.legendary { border:1px solid #fbbf24; }
+@keyframes toastPop { 0% { transform:translateY(-8px) scale(.9); opacity:0;} 100% { transform:translateY(0) scale(1); opacity:1;} }
+
+/* Special effect styling placeholder (glow / spark) */
+.color-effect-glow { box-shadow:0 0 6px 2px currentColor, 0 0 14px 4px currentColor inset; }
+.color-effect-spark { position:relative; }
+.color-effect-spark:after { content:""; position:absolute; inset:0; background:radial-gradient(circle at 30% 30%,rgba(255,255,255,0.8),transparent 60%),radial-gradient(circle at 70% 60%,rgba(255,255,255,0.7),transparent 65%); mix-blend-mode:screen; pointer-events:none; border-radius:inherit; }
+
+/* Economy Sidebar (right cluster) */
+.economy-sidebar { position:fixed; top:50%; right:18px; transform:translateY(-50%); display:flex; flex-direction:column; gap:10px; z-index:8500; }
+.economy-sidebar .eco-line { display:flex; align-items:center; gap:6px; background:rgba(20,25,40,0.6); backdrop-filter:blur(10px); padding:6px 10px 6px 8px; border-radius:18px; font-size:13px; color:#fff; border:1px solid rgba(255,255,255,0.08); box-shadow:0 2px 10px -2px rgba(0,0,0,0.4); }
+.economy-sidebar .eco-line.level { flex-direction:column; align-items:stretch; gap:6px; min-width:120px; }
+/* --- Admin Panel Styles --- */
+.admin-panel { background:rgba(20,27,40,0.85); padding:16px; border-radius:16px; margin:18px auto 40px; max-width:1000px; color:#e2e8f0; border:1px solid rgba(255,255,255,0.08); backdrop-filter:blur(12px); box-shadow:0 8px 28px -6px rgba(0,0,0,0.55); }
+.admin-panel h3 { margin:4px 0 14px; font-size:20px; font-weight:600; letter-spacing:.5px; }
+.admin-tabs { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
+.admin-tab-link { background:#1e293b; color:#cbd5e1; border:1px solid #334155; padding:6px 12px; border-radius:8px; font-size:13px; cursor:pointer; display:flex; align-items:center; gap:4px; }
+.admin-tab-link:hover { background:#334155; color:#fff; }
+.admin-form { display:flex; flex-wrap:wrap; gap:8px; background:rgba(255,255,255,0.03); padding:10px; border:1px solid rgba(255,255,255,0.05); border-radius:10px; }
+.admin-form input, .admin-form select, .admin-form button, .admin-panel textarea { background:#0f172a; color:#e2e8f0; border:1px solid #334155; padding:6px 8px; border-radius:6px; font-size:12px; font-family:inherit; }
+.admin-form input:focus, .admin-form select:focus, .admin-panel textarea:focus { outline:1px solid #3b82f6; }
+.admin-form button { background:#2563eb; border:none; cursor:pointer; font-weight:600; letter-spacing:.5px; }
+.admin-form button:hover { background:#1d4ed8; }
+.admin-list { margin-top:10px; display:flex; flex-direction:column; gap:4px; max-height:260px; overflow:auto; font-size:12px; }
+.admin-row { display:flex; gap:10px; align-items:center; background:#162132; padding:6px 8px; border-radius:8px; line-height:1.2; }
+.admin-row code { background:#0f172a; padding:2px 4px; border-radius:4px; font-size:11px; }
+.admin-row button { background:#dc2626; border:none; color:#fff; padding:2px 6px; border-radius:4px; cursor:pointer; font-size:11px; }
+.admin-row button:hover { background:#b91c1c; }
+.import-export button { background:#475569; border:none; color:#fff; padding:6px 10px; border-radius:6px; margin:6px 0; cursor:pointer; font-size:12px; }
+.import-export button:hover { background:#64748b; }
+.status-line { font-size:12px; margin-top:6px; color:#94a3b8; }
+.economy-sidebar .eco-ico { font-size:18px; opacity:.9; }
+.level-chip { background:linear-gradient(135deg,#6366f1,#8b5cf6); font-size:11px; padding:2px 8px; border-radius:12px; font-weight:600; letter-spacing:.5px; display:inline-block; }
+.xp-mini-bar { position:relative; width:100%; height:6px; background:rgba(255,255,255,0.15); border-radius:4px; overflow:hidden; }
+.xp-mini-text { font-size:10px; align-self:flex-end; opacity:.75; }
+
+@media (max-width: 900px) {
+    .economy-sidebar { top:auto; bottom:90px; right:12px; transform:none; }
+}
+
 /* Remove any default styling that might cause white bars */
 html, body {
     margin: 0;
@@ -518,6 +612,18 @@ html, body {
     box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.4);
     transform: scale(1.15);
 }
+
+/* Reward scaling indicator */
+.reward-scale { display:flex; align-items:center; gap:6px; margin-top:6px; font-size:11px; color:var(--text-secondary); }
+.reward-scale .rs-ring { position:relative; width:30px; height:30px; border-radius:50%; background:conic-gradient(var(--success) 0deg, var(--success) 360deg); display:flex; align-items:center; justify-content:center; }
+.reward-scale .rs-ring:after { content:""; position:absolute; inset:4px; background:rgba(255,255,255,0.15); border-radius:50%; }
+.reward-scale .rs-fill { position:absolute; inset:0; border-radius:50%; background:conic-gradient(var(--success) 0deg, var(--warning) 180deg, var(--error) 360deg); mask:radial-gradient(circle at center, transparent 60%, black 61%); -webkit-mask:radial-gradient(circle at center, transparent 60%, black 61%); }
+.reward-scale .rs-text { font-weight:600; letter-spacing:.5px; }
+
+/* Effect color buttons */
+.color-btn.effect-glow { box-shadow:0 0 6px 2px rgba(255,255,255,0.4), 0 0 14px 4px currentColor inset; position:relative; }
+.color-btn.effect-spark { position:relative; }
+.color-btn.effect-spark:after { content:""; position:absolute; inset:0; background:radial-gradient(circle at 30% 30%,rgba(255,255,255,0.9),transparent 55%),radial-gradient(circle at 70% 70%,rgba(255,255,255,0.7),transparent 60%); mix-blend-mode:screen; border-radius:inherit; pointer-events:none; }
 
 /* Prevent color button interaction when palette is minimized */
 .color-palette-fixed.minimized .color-btn {

@@ -11,6 +11,8 @@ from app.db.repositories.user_repository import user_repository
 from sqlalchemy import select, desc
 from app.services.achievement_service import achievement_service
 from app.models.models import AuthenticatedUser
+from app.services.loot_box_service import loot_box_service
+from app.services.xp_service import xp_service
 
 security = HTTPBearer()
 
@@ -102,6 +104,34 @@ def create_api_router(region_manager: RegionManager) -> APIRouter:
             "canvas_size": f"{settings.CANVAS_SIZE}x{settings.CANVAS_SIZE}",
             "total_regions": settings.REGIONS_PER_SIDE * settings.REGIONS_PER_SIDE,
             "authentication": "enabled"
+        }
+
+    @router.get("/pixel_bag/sync")
+    async def sync_pixel_bag(current_user: AuthenticatedUser = Depends(get_current_user)):
+        """Force a server-side refill tick then return authoritative pixel bag state and timing info.
+
+        Use on reconnect or if client detects desync (negative, > max, stalled refill timer).
+        """
+        from datetime import datetime
+        # Perform refill calculation first
+        auth_service.refill_user_pixels(current_user.username)
+        user = auth_service.get_user_by_username(current_user.username)
+        if not getattr(user, 'last_bag_refill_at', None):
+            user.last_bag_refill_at = datetime.now()
+        seconds_since_anchor = (datetime.now() - user.last_bag_refill_at).total_seconds()
+        if user.pixel_bag_size >= user.max_pixel_bag_size:
+            next_pixel_in = 0
+            full_refill_eta = 0
+        else:
+            remainder = settings.PIXEL_REFILL_RATE - (seconds_since_anchor % settings.PIXEL_REFILL_RATE)
+            next_pixel_in = int(remainder) if remainder < settings.PIXEL_REFILL_RATE else settings.PIXEL_REFILL_RATE
+            pixels_missing = user.max_pixel_bag_size - user.pixel_bag_size
+            full_refill_eta = pixels_missing * settings.PIXEL_REFILL_RATE
+        return {
+            "pixel_bag_size": user.pixel_bag_size,
+            "max_pixel_bag_size": user.max_pixel_bag_size,
+            "next_pixel_in": next_pixel_in,
+            "full_refill_eta": full_refill_eta
         }
 
     # ==================== Achievements ====================
@@ -205,5 +235,222 @@ def create_api_router(region_manager: RegionManager) -> APIRouter:
             e['rank'] = rank
             ranked.append(e)
         return {'type': rtype, 'results': ranked}
+
+    # ==================== Items & Loot Boxes ====================
+    @router.get('/items')
+    async def list_items():
+        return {"items": loot_box_service.list_items()}
+
+    @router.get('/loot/boxes')
+    async def list_loot_boxes():
+        return {"boxes": loot_box_service.list_boxes()}
+
+    @router.get('/inventory/colors')
+    async def get_owned_colors(current_user: AuthenticatedUser = Depends(get_current_user)):
+        user = auth_service.get_user_by_username(current_user.username)
+        # Always expose 16 basic palette colors first (fixed list)
+        base_palette = [
+            ("basic_1", "Basic Red", "#FF0000"), ("basic_2", "Basic Green", "#00FF00"),
+            ("basic_3", "Basic Blue", "#0000FF"), ("basic_4", "Basic Yellow", "#FFFF00"),
+            ("basic_5", "Basic Magenta", "#FF00FF"), ("basic_6", "Basic Cyan", "#00FFFF"),
+            ("basic_7", "Basic White", "#FFFFFF"), ("basic_8", "Basic Black", "#000000"),
+            ("basic_9", "Basic Maroon", "#800000"), ("basic_10", "Basic DarkGreen", "#008000"),
+            ("basic_11", "Basic Navy", "#000080"), ("basic_12", "Basic Olive", "#808000"),
+            ("basic_13", "Basic Purple", "#800080"), ("basic_14", "Basic Teal", "#008080"),
+            ("basic_15", "Basic Silver", "#C0C0C0"), ("basic_16", "Basic Gray", "#808080")
+        ]
+        colors = [
+            {"id": bid, "name": name, "color": hexv, "rarity": "COMMON", "effect": None, "tags": ["base"]}
+            for (bid, name, hexv) in base_palette
+        ]
+        # Append owned unlockable colors (avoid duplicates by color code & id uniqueness)
+        from app.models.items import ItemType
+        seen_ids = {c[0] for c in base_palette}
+        for cid in getattr(user, 'owned_colors', []) or []:
+            if cid in seen_ids:
+                continue
+            it = loot_box_service.get_item(cid)
+            if it and it.type == ItemType.COLOR:
+                colors.append({
+                    "id": it.id,
+                    "name": it.name,
+                    "color": it.payload.get("color"),
+                    "rarity": it.rarity,
+                    "effect": it.payload.get("effect"),
+                    "tags": it.tags or []
+                })
+        return {"colors": colors}
+
+    # Reward scaling snapshot (diminishing returns) for UI indicator
+    @router.get('/reward/scale')
+    async def get_reward_scale(current_user: AuthenticatedUser = Depends(get_current_user)):
+        return auth_service.get_reward_scaling_snapshot(current_user.username)
+
+    # ----- Admin Loot Management -----
+    @router.post("/loot/admin/item/upsert")
+    async def admin_upsert_item(payload: dict, current_user: AuthenticatedUser = Depends(get_current_user)):
+        if not current_user.is_admin():
+            raise HTTPException(status_code=403, detail="Admin only")
+        required = {"id","type","name","rarity"}
+        if not required.issubset(payload):
+            raise HTTPException(status_code=400, detail="Missing fields")
+        from app.models.items import ItemDef, ItemType, Rarity
+        try:
+            item = ItemDef(
+                id=payload['id'],
+                type=ItemType(payload['type']),
+                name=payload['name'],
+                rarity=Rarity(payload['rarity']),
+                payload=payload.get('payload', {}),
+                tags=payload.get('tags', [])
+            )
+            loot_box_service.items[item.id] = item
+            loot_box_service._save_all()
+            return {"success": True, "item": item.id}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid item: {e}")
+
+    @router.delete("/loot/admin/item/{item_id}")
+    async def admin_delete_item(item_id: str, current_user: AuthenticatedUser = Depends(get_current_user)):
+        if not current_user.is_admin():
+            raise HTTPException(status_code=403, detail="Admin only")
+        if item_id in loot_box_service.items:
+            del loot_box_service.items[item_id]
+            loot_box_service._save_all()
+            return {"success": True}
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    @router.post("/loot/admin/box/upsert")
+    async def admin_upsert_box(payload: dict, current_user: AuthenticatedUser = Depends(get_current_user)):
+        if not current_user.is_admin():
+            raise HTTPException(status_code=403, detail="Admin only")
+        required = {"id","name","price_coins","drops"}
+        if not required.issubset(payload):
+            raise HTTPException(status_code=400, detail="Missing fields")
+        from app.models.items import LootBoxDef, LootBoxDrop
+        try:
+            drops = [LootBoxDrop(item_id=d['item_id'], weight=int(d['weight'])) for d in payload['drops']]
+            box = LootBoxDef(
+                id=payload['id'],
+                name=payload['name'],
+                price_coins=int(payload['price_coins']),
+                drops=drops,
+                guaranteed=payload.get('guaranteed', []),
+                rarity_bonus=payload.get('rarity_bonus', {}),
+                max_rolls=int(payload.get('max_rolls', 1))
+            )
+            loot_box_service.boxes[box.id] = box
+            loot_box_service._save_all()
+            return {"success": True, "box": box.id}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid box: {e}")
+
+    @router.delete("/loot/admin/box/{box_id}")
+    async def admin_delete_box(box_id: str, current_user: AuthenticatedUser = Depends(get_current_user)):
+        if not current_user.is_admin():
+            raise HTTPException(status_code=403, detail="Admin only")
+        if box_id in loot_box_service.boxes:
+            del loot_box_service.boxes[box_id]
+            loot_box_service._save_all()
+            return {"success": True}
+        raise HTTPException(status_code=404, detail="Box not found")
+
+    @router.get("/loot/admin/export")
+    async def admin_export_loot(current_user: AuthenticatedUser = Depends(get_current_user)):
+        if not current_user.is_admin():
+            raise HTTPException(status_code=403, detail="Admin only")
+        return {"items": loot_box_service.list_items(), "boxes": loot_box_service.list_boxes()}
+
+    @router.post("/loot/admin/import")
+    async def admin_import_loot(payload: dict, current_user: AuthenticatedUser = Depends(get_current_user)):
+        if not current_user.is_admin():
+            raise HTTPException(status_code=403, detail="Admin only")
+        items = payload.get('items', [])
+        boxes = payload.get('boxes', [])
+        from app.models.items import ItemDef, ItemType, Rarity, LootBoxDef, LootBoxDrop
+        imported_items = 0
+        for raw in items:
+            try:
+                it = ItemDef(id=raw['id'], type=ItemType(raw['type']), name=raw['name'], rarity=Rarity(raw['rarity']), payload=raw.get('payload', {}), tags=raw.get('tags', []))
+                loot_box_service.items[it.id] = it
+                imported_items += 1
+            except Exception:
+                continue
+        imported_boxes = 0
+        for raw in boxes:
+            try:
+                drops = [LootBoxDrop(item_id=d['item_id'], weight=int(d['weight'])) for d in raw.get('drops', [])]
+                box = LootBoxDef(id=raw['id'], name=raw['name'], price_coins=int(raw['price_coins']), drops=drops, guaranteed=raw.get('guaranteed', []), rarity_bonus=raw.get('rarity_bonus', {}), max_rolls=int(raw.get('max_rolls', 1)))
+                loot_box_service.boxes[box.id] = box
+                imported_boxes += 1
+            except Exception:
+                continue
+        loot_box_service._save_all()
+        return {"success": True, "imported_items": imported_items, "imported_boxes": imported_boxes}
+    @router.post('/loot/open')
+    async def open_loot_box(payload: dict, current_user: AuthenticatedUser = Depends(get_current_user)):
+        box_id = payload.get('box_id')
+        if not box_id:
+            raise HTTPException(status_code=400, detail='Missing box_id')
+        result = loot_box_service.open_box(current_user.username, box_id)
+        if not result.get('success'):
+            raise HTTPException(status_code=400, detail=result.get('error', 'Open failed'))
+        # XP reward (small) per open
+        xp_service.add_xp(current_user.username, 10)
+        # Reload user to get fresh XP/level/coins (open_box already persisted)
+        refreshed = auth_service.get_user_by_username(current_user.username)
+        if refreshed:
+            result.update({
+                "experience_points": getattr(refreshed, 'experience_points', 0),
+                "user_level": getattr(refreshed, 'user_level', 1),
+                "xp_to_next": getattr(refreshed, 'xp_to_next_cache', 0),
+                "coins": getattr(refreshed, 'coins', result.get('coins', 0))
+            })
+        return result
+
+    @router.post('/admin/items/upsert')
+    async def admin_upsert_item(payload: dict, current_user: AuthenticatedUser = Depends(get_current_user)):
+        if not current_user.is_admin():
+            raise HTTPException(status_code=403, detail='Admin only')
+        required = {'id','type','name','rarity'}
+        if not required.issubset(payload):
+            raise HTTPException(status_code=400, detail='Missing fields')
+        from app.models.items import ItemDef, ItemType, Rarity
+        try:
+            item = ItemDef(
+                id=payload['id'],
+                type=ItemType(payload['type']),
+                name=payload['name'],
+                rarity=Rarity(payload['rarity']),
+                payload=payload.get('payload', {}),
+                tags=payload.get('tags', [])
+            )
+            loot_box_service.items[item.id] = item
+            loot_box_service._save_all()
+            return {"success": True, "item": item.__dict__}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @router.post('/admin/loot/boxes/upsert')
+    async def admin_upsert_box(payload: dict, current_user: AuthenticatedUser = Depends(get_current_user)):
+        if not current_user.is_admin():
+            raise HTTPException(status_code=403, detail='Admin only')
+        from app.models.items import LootBoxDef, LootBoxDrop
+        try:
+            drops = [LootBoxDrop(**d) for d in payload.get('drops', [])]
+            box = LootBoxDef(
+                id=payload['id'],
+                name=payload.get('name', payload['id']),
+                price_coins=payload.get('price_coins', 0),
+                drops=drops,
+                guaranteed=payload.get('guaranteed', []),
+                rarity_bonus=payload.get('rarity_bonus', {}),
+                max_rolls=payload.get('max_rolls', 1)
+            )
+            loot_box_service.boxes[box.id] = box
+            loot_box_service._save_all()
+            return {"success": True, "box": box.id}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
     
     return router

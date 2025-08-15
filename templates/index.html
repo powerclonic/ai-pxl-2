@@ -79,9 +79,22 @@
                 <button class="fab" onclick="zoomToCenter()" title="Center" aria-label="Center"><span class="material-symbols-rounded">center_focus_strong</span></button>
                 <button class="fab" onclick="openProfile()" title="Profile" aria-label="Profile"><span class="material-symbols-rounded">person</span></button>
                 <button class="fab" onclick="openRankings()" title="Rankings" aria-label="Rankings"><span class="material-symbols-rounded">emoji_events</span></button>
+                <button class="fab" onclick="openLootBoxesModal()" title="Loot Boxes" aria-label="Loot Boxes"><span class="material-symbols-rounded">inventory_2</span></button>
                 <button class="fab" onclick="showTutorial()" title="Help" aria-label="Help"><span class="material-symbols-rounded">help</span></button>
                 <button class="fab admin-only" id="adminNavBtn" style="display:none;" onclick="openAdminPanel()" title="Admin" aria-label="Admin"><span class="material-symbols-rounded">build</span></button>
                 <button class="fab danger" onclick="logout()" title="Logout" aria-label="Logout"><span class="material-symbols-rounded">power_settings_new</span></button>
+            </div>
+            <!-- Compact Economy Sidebar -->
+            <div class="economy-sidebar" id="economySidebar">
+                <div class="eco-line" title="Coins">
+                    <span class="material-symbols-rounded eco-ico">paid</span>
+                    <span id="coinBalance">0</span>
+                </div>
+                <div class="eco-line level" title="Level Progress">
+                    <span id="levelBadge" class="level-chip">Lv.1</span>
+                    <div class="xp-mini-bar"><div id="xpFill" class="xp-fill"></div></div>
+                    <span id="xpText" class="xp-mini-text">0/0</span>
+                </div>
             </div>
         </div>
 
@@ -90,6 +103,8 @@
                 <canvas id="pixelCanvas" width="800" height="600"></canvas>
                 <div class="pixel-preview" id="pixelPreview"></div>
             </div>
+
+            <!-- (Removed centered economy bar) -->
 
             <!-- Pixel Info Tooltip -->
             <div class="pixel-info-tooltip" id="pixelInfoTooltip">
@@ -108,6 +123,61 @@
             </div>
         </div>
 
+        <!-- Admin Panel (hidden unless user is admin) -->
+        <div id="adminPanel" class="admin-panel" style="display:none;">
+            <h3>Admin Loot Management</h3>
+            <div class="admin-tabs">
+                <button class="admin-tab-link" data-target="adminItems">Items</button>
+                <button class="admin-tab-link" data-target="adminBoxes">Boxes</button>
+                <button class="admin-tab-link" data-target="adminImportExport">Import/Export</button>
+            </div>
+            <div class="admin-tab" id="adminItems" style="display:none;">
+                <h4>Items</h4>
+                <form id="adminItemForm" class="admin-form">
+                    <input name="id" placeholder="id" required>
+                    <select name="type">
+                        <option value="COLOR">COLOR</option>
+                        <option value="EFFECT">EFFECT</option>
+                        <option value="UPGRADE">UPGRADE</option>
+                        <option value="CURRENCY_PACK">CURRENCY</option>
+                    </select>
+                    <input name="name" placeholder="name" required>
+                    <select name="rarity">
+                        <option>COMMON</option><option>UNCOMMON</option><option>RARE</option><option>EPIC</option><option>LEGENDARY</option>
+                    </select>
+                    <input name="payload_color" placeholder="payload.color (#hex)">
+                    <input name="payload_effect" placeholder="payload.effect (glow/spark)">
+                    <input name="tags" placeholder="tags (comma)">
+                    <button type="submit">Upsert</button>
+                </form>
+                <div id="adminItemsList" class="admin-list"></div>
+            </div>
+            <div class="admin-tab" id="adminBoxes" style="display:none;">
+                <h4>Boxes</h4>
+                <form id="adminBoxForm" class="admin-form">
+                    <input name="id" placeholder="id" required>
+                    <input name="name" placeholder="name" required>
+                    <input name="price_coins" placeholder="price" type="number" min="0" required>
+                    <input name="drops" placeholder="drops item:weight;item2:weight" required>
+                    <input name="guaranteed" placeholder="guaranteed ids (comma)">
+                    <input name="rarity_bonus" placeholder='rarity_bonus JSON {"RARE":5}'>
+                    <input name="max_rolls" type="number" min="1" value="1" placeholder="max_rolls">
+                    <button type="submit">Upsert</button>
+                </form>
+                <div id="adminBoxesList" class="admin-list"></div>
+            </div>
+            <div class="admin-tab" id="adminImportExport" style="display:none;">
+                <h4>Import / Export</h4>
+                <div class="import-export">
+                    <button id="btnExportLoot" type="button">Export JSON</button>
+                    <textarea id="lootExportArea" placeholder="Export output" style="width:100%;height:120px;"></textarea>
+                    <textarea id="lootImportArea" placeholder='{"items":[],"boxes":[]}' style="width:100%;height:120px;"></textarea>
+                    <button id="btnImportLoot" type="button">Import</button>
+                    <div id="lootImportStatus" class="status-line"></div>
+                </div>
+            </div>
+        </div>
+
         <!-- Floating Minimalist Color Palette -->
         <div class="color-palette-fixed minimized" id="colorPaletteFixed">
             <!-- Toggle Button - Always Visible -->
@@ -122,6 +192,10 @@
                     <div class="bag-text" id="bagText">Pixels: <span id="pixelCount">0</span></div>
                     <div class="bag-progress">
                         <div class="bag-fill" id="bagFill"></div>
+                    </div>
+                    <div class="reward-scale" id="rewardScaleIndicator" title="Current reward scaling">
+                        <div class="rs-ring"><div class="rs-fill" id="rsFill"></div></div>
+                        <div class="rs-text" id="rsText">100%</div>
                     </div>
                 </div>
 
@@ -194,6 +268,18 @@
                     <h3>Pixel Bag System</h3>
                     <p>You have a limited number of pixels that refill over time. Use them wisely to create your masterpiece!</p>
                 </div>
+                
+                <div class="tutorial-step" id="step6">
+                    <div class="tutorial-icon">📦</div>
+                    <h3>Loot & Coins</h3>
+                    <p>Agora você ganha <strong>coins</strong> colocando pixels, mandando mensagens e concluindo achievements. Use o botão <span class="material-symbols-rounded icon-inline" style="font-size:18px; vertical-align:middle;">inventory_2</span> para abrir <strong>loot boxes</strong> com cores raras, efeitos (glow / spark) e upgrades de bag.</p>
+                </div>
+
+                <div class="tutorial-step" id="step7">
+                    <div class="tutorial-icon">🆙</div>
+                    <h3>Levels & XP</h3>
+                    <p>XP vem de pixels, chat, loot e achievements. Ao subir de nível você recebe um bônus de coins (10 × nível). A mini barra mostra seu progresso para o próximo nível.</p>
+                </div>
             </div>
             
             <div class="tutorial-footer">
@@ -204,6 +290,8 @@
                     <span class="dot" onclick="goToStep(3)"></span>
                     <span class="dot" onclick="goToStep(4)"></span>
                     <span class="dot" onclick="goToStep(5)"></span>
+                    <span class="dot" onclick="goToStep(6)"></span>
+                    <span class="dot" onclick="goToStep(7)"></span>
                 </div>
                 <button class="tutorial-nav-btn" id="nextBtn" onclick="nextStep()">Next</button>
             </div>
@@ -281,6 +369,18 @@
 
     <!-- Achievement Toasts -->
     <div id="achievementToasts" style="position:fixed; top:20px; right:20px; z-index:12000; display:flex; flex-direction:column; gap:12px; pointer-events:none;"></div>
+
+    <!-- Loot Boxes Modal -->
+    <div class="loot-modal glass-readable" id="lootModal" style="display:none;">
+        <div class="loot-modal-content">
+            <div class="loot-header">
+                <h2><span class="material-symbols-rounded icon-inline">inventory_2</span> Loot Boxes</h2>
+                <button class="loot-close" onclick="closeLootBoxesModal()">×</button>
+            </div>
+            <div id="lootBoxesList" class="loot-boxes-list">Loading...</div>
+            <div class="loot-result" id="lootResult" style="display:none;"></div>
+        </div>
+    </div>
 
     <!-- Rankings Modal -->
     <div class="rankings-modal glass-readable" id="rankingsModal">

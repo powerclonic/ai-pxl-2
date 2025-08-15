@@ -31,6 +31,10 @@ class AuthService:
         self.failed_attempts: Dict[str, int] = {}  # user_id -> count
         self.session_tokens: Dict[str, str] = {}  # token -> user_id
         self.session_locks: Dict[str, float] = {}  # user_id -> timestamp (for race condition prevention)
+        # Batched persistence for frequent small updates (pixels, chat)
+        self._dirty_users: set[str] = set()
+        self._dirty_flush_task = None
+        self._dirty_last_flush = time.time()
         
         # Async load from DB (fallback to JSON seed)
         self._bootstrap_done = False
@@ -478,6 +482,110 @@ class AuthService:
                 loop.run_until_complete(_save_one())
         except RuntimeError:
             asyncio.run(_save_one())
+
+    # ================= Batched Dirty Persistence =================
+    def enqueue_dirty(self, username: str):
+        """Queue a user for batched persistence to reduce DB writes during bursts.
+
+        Flush heuristics:
+          - Immediate flush if queue >= 50
+          - Timed flush (1s debounce) otherwise
+        """
+        if username not in self.users:
+            return
+        self._dirty_users.add(username)
+        # Immediate threshold flush
+        if len(self._dirty_users) >= 50:
+            self._schedule_dirty_flush(immediate=True)
+        else:
+            self._schedule_dirty_flush(immediate=False)
+
+    def _schedule_dirty_flush(self, immediate: bool = False):
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return
+        if self._dirty_flush_task and not self._dirty_flush_task.cancelled():
+            if immediate:
+                self._dirty_flush_task.cancel()
+            else:
+                return  # Existing scheduled flush OK
+        delay = 0 if immediate else 1.0
+
+        async def _flush_later():
+            try:
+                if delay:
+                    await asyncio.sleep(delay)
+                await self._flush_dirty_users()
+            except asyncio.CancelledError:
+                pass
+        self._dirty_flush_task = loop.create_task(_flush_later())
+
+    async def _flush_dirty_users(self):
+        if not self._dirty_users:
+            return
+        dirty = list(self._dirty_users)
+        self._dirty_users.clear()
+        try:
+            async for session in get_session():
+                for username in dirty:
+                    user = self.users.get(username)
+                    if user:
+                        await user_repository.upsert_user(session, user)
+                await session.commit()
+        except Exception as e:
+            print(f"⚠️ Dirty user batch flush failed: {e}")
+        # JSON backup best-effort
+        try:
+            persistence_service.save_users(self.users)
+        except Exception:
+            pass
+        self._dirty_last_flush = time.time()
+
+    def flush_dirty_now(self):
+        """Synchronous helper to force immediate flush (used after bulk ops)."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._flush_dirty_users())
+            else:
+                loop.run_until_complete(self._flush_dirty_users())
+        except RuntimeError:
+            asyncio.run(self._flush_dirty_users())
+
+    # ================= Reward Scaling Snapshot =================
+    def get_reward_scaling_snapshot(self, username: str) -> Dict:
+        """Return current diminishing reward scaling info for the user.
+
+        Fields:
+          actions_in_window: int
+          scale: float (0-1)
+          scale_percent: int (0-100)
+          window_seconds_remaining: int
+        """
+        user = self.users.get(username)
+        if not user:
+            return {"actions_in_window": 0, "scale": 1.0, "scale_percent": 100, "window_seconds_remaining": 60}
+        WINDOW = 60
+        now = datetime.now()
+        if not getattr(user, 'reward_window_start', None) or (now - user.reward_window_start).total_seconds() > WINDOW:
+            # Window either not started or expired -> fresh window
+            return {"actions_in_window": 0, "scale": 1.0, "scale_percent": 100, "window_seconds_remaining": WINDOW}
+        elapsed = (now - user.reward_window_start).total_seconds()
+        remaining = int(max(0, WINDOW - elapsed))
+        actions = getattr(user, 'reward_actions_in_window', 0)
+        if actions <= 50:
+            scale = 1.0
+        elif actions >= 200:
+            scale = 0.0
+        else:
+            scale = max(0.0, 1 - (actions - 50) / 150.0)
+        return {
+            "actions_in_window": actions,
+            "scale": scale,
+            "scale_percent": int(scale * 100),
+            "window_seconds_remaining": remaining
+        }
     
     def _save_sessions(self):
         """Save sessions to persistence"""
@@ -578,36 +686,65 @@ class AuthService:
         return self.users.get(username)
     
     def refill_user_pixels(self, username: str) -> int:
-        """Refill user's pixel bag based on time passed - DATABASE VERSION"""
+        """Refill user's pixel bag based on time passed using dedicated refill anchor.
+
+        Previous implementation reused last_pixel_placed_at which only advanced when a pixel was placed.
+        That caused refills to appear frozen for idle users (no placement -> no timestamp advance -> no regen).
+        We now track last_bag_refill_at separately, only updating it when we actually credit pixels.
+        """
         user = self.get_user_by_username(username)
         if not user:
             return 0
-        
-        if not user.last_pixel_placed_at:
-            # If never placed a pixel, start from now
-            user.last_pixel_placed_at = datetime.now()
+
+        # Initialize anchor if missing
+        if not getattr(user, 'last_bag_refill_at', None):
+            user.last_bag_refill_at = datetime.now()
             return 0
-        
-        current_time = datetime.now()
-        time_passed = (current_time - user.last_pixel_placed_at).total_seconds()
-        pixels_to_add = int(time_passed // self.settings.PIXEL_REFILL_RATE)
-        
-        if pixels_to_add > 0:
-            old_count = user.pixel_bag_size
-            user.pixel_bag_size = min(user.max_pixel_bag_size, user.pixel_bag_size + pixels_to_add)
-            
-            # Update refill timestamp
-            user.last_pixel_placed_at = current_time
-            
-            # Save to database
-            self._save_user(username)
-            
-            pixels_added = user.pixel_bag_size - old_count
-            if pixels_added > 0:
-                print(f"🔋 Refilled {username}: +{pixels_added} pixels ({user.pixel_bag_size}/{user.max_pixel_bag_size})")
-            
-            return pixels_added
-        return 0
+
+        now = datetime.now()
+        elapsed = (now - user.last_bag_refill_at).total_seconds()
+        if elapsed < self.settings.PIXEL_REFILL_RATE:
+            return 0
+
+        pixels_to_add = int(elapsed // self.settings.PIXEL_REFILL_RATE)
+        if pixels_to_add <= 0:
+            return 0
+
+        old = user.pixel_bag_size
+        user.pixel_bag_size = min(user.max_pixel_bag_size, user.pixel_bag_size + pixels_to_add)
+        # Advance anchor only by the consumed full intervals to preserve fractional remainder
+        consumed_seconds = pixels_to_add * self.settings.PIXEL_REFILL_RATE
+        user.last_bag_refill_at = user.last_bag_refill_at + timedelta(seconds=consumed_seconds)
+        self._save_user(username)
+        gained = user.pixel_bag_size - old
+        if gained > 0:
+            print(f"🔋 Refilled {username}: +{gained} ({user.pixel_bag_size}/{user.max_pixel_bag_size})")
+        return gained
+
+    # ---- Pixel bag timing helpers ----
+    def get_next_pixel_in(self, username: str) -> int:
+        """Return seconds until next pixel would be added (0 if full)."""
+        user = self.get_user_by_username(username)
+        if not user:
+            return 0
+        if user.pixel_bag_size >= user.max_pixel_bag_size:
+            return 0
+        if not getattr(user, 'last_bag_refill_at', None):
+            return self.settings.PIXEL_REFILL_RATE
+        from datetime import datetime
+        elapsed = (datetime.now() - user.last_bag_refill_at).total_seconds()
+        remainder = self.settings.PIXEL_REFILL_RATE - (elapsed % self.settings.PIXEL_REFILL_RATE)
+        return int(remainder) if remainder > 0 else self.settings.PIXEL_REFILL_RATE
+
+    def get_full_refill_eta(self, username: str) -> int:
+        """Return total seconds until bag would be full (0 if already full)."""
+        user = self.get_user_by_username(username)
+        if not user:
+            return 0
+        missing = user.max_pixel_bag_size - user.pixel_bag_size
+        if missing <= 0:
+            return 0
+        return missing * self.settings.PIXEL_REFILL_RATE
     
     def update_user_field(self, username: str, field: str, value: str) -> bool:
         """Update a specific field for a user (admin only)"""

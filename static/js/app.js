@@ -1,3 +1,5 @@
+let colorEffectMap = new Map(); // Map color hex -> effect name (glow, spark) gathered from owned colors list
+    colorEffectMap = new Map();
 // Global variables
 let ws = null;
 let canvas = null; // Will be initialized when DOM is ready
@@ -30,6 +32,8 @@ let lastMouseY = 0;
 // Pixel bag system - will be loaded from server config
 let pixelBag = 0;
 let maxPixelBag = 0;
+let bagNextPixelIn = 0;
+let bagFullEta = 0;
 let lastPixelTime = 0;
 let bagRefillInterval = null;
 let loadedRegions = new Set();
@@ -306,16 +310,56 @@ function zoomToCenter() {
 }
 
 function setupColorPalette() {
-    const colorGrid = document.getElementById('colorGrid');
-    colors.forEach((color, index) => {
-        const colorBtn = document.createElement('div');
-        colorBtn.className = 'color-btn';
-        if (index === 0) colorBtn.classList.add('selected');
-        colorBtn.style.backgroundColor = color;
-        colorBtn.onclick = () => selectColor(color, colorBtn);
-        colorGrid.appendChild(colorBtn);
-    });
+    rebuildOwnedColors();
 }
+
+async function rebuildOwnedColors() {
+    const colorGrid = document.getElementById('colorGrid');
+    if (!colorGrid) return;
+    colorGrid.innerHTML = '';
+    try {
+        const r = await fetch('/api/inventory/colors', { headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {} });
+        if (r.ok) {
+            const data = await r.json();
+            const list = data.colors || [];
+            list.forEach((c, idx) => {
+                const btn = document.createElement('div');
+                btn.className = 'color-btn';
+            if (c.effect === 'glow' || (c.tags||[]).includes('effect:glow')) { btn.classList.add('effect-glow'); colorEffectMap.set(c.color.toLowerCase(), 'glow'); }
+            if (c.effect === 'spark' || (c.tags||[]).includes('effect:spark')) { btn.classList.add('effect-spark'); colorEffectMap.set(c.color.toLowerCase(), 'spark'); }
+                if (idx === 0) btn.classList.add('selected');
+                btn.style.backgroundColor = c.color;
+                btn.title = `${c.name} (${c.rarity})`;
+                btn.onclick = () => selectColor(c.color, btn);
+                colorGrid.appendChild(btn);
+            });
+        }
+    } catch(e) {
+        console.warn('Failed loading owned colors', e);
+    }
+}
+
+// Reward scaling indicator logic
+let rewardScaleLastFetch = 0;
+async function updateRewardScaleIndicator() {
+    const now = Date.now();
+    if (now - rewardScaleLastFetch < 3000) return; // throttle 3s
+    rewardScaleLastFetch = now;
+    try {
+        const r = await fetch('/api/reward/scale', { headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {} });
+        if (!r.ok) return;
+        const data = await r.json();
+        const pct = data.scale_percent ?? Math.round((data.scale||1)*100);
+        const ring = document.getElementById('rsFill');
+        const txt = document.getElementById('rsText');
+        if (ring) {
+            const deg = (pct/100)*360;
+            ring.style.background = `conic-gradient(var(--success) 0deg, var(--warning) ${deg*0.6}deg, var(--error) ${deg}deg, rgba(255,255,255,0.1) ${deg}deg 360deg)`;
+        }
+        if (txt) txt.textContent = pct + '%';
+    } catch(e) { /* silent */ }
+}
+setInterval(updateRewardScaleIndicator, 3500);
 
 function selectColor(color, element) {
     selectedColor = color;
@@ -342,24 +386,25 @@ function toggleColorPalette() {
     }
 }
 
-// Pixel Bag System
-function startPixelBagSystem() {
-    // Start with configured initial pixels
-    pixelBag = CONFIG.INITIAL_PIXEL_BAG;
-    updatePixelBagDisplay();
-
-    // Clear any existing interval
-    if (bagRefillInterval) {
-        clearInterval(bagRefillInterval);
+// Pixel Bag System (server authoritative)
+function startPixelBagSystem(initial) {
+    if (initial) {
+        if (initial.pixel_bag_size !== undefined) pixelBag = initial.pixel_bag_size;
+        if (initial.max_pixel_bag_size !== undefined) maxPixelBag = initial.max_pixel_bag_size;
     }
-
-    // Refill bag based on configured rate (convert seconds to milliseconds)
+    updatePixelBagDisplay();
+    if (bagRefillInterval) clearInterval(bagRefillInterval);
     bagRefillInterval = setInterval(() => {
-        if (pixelBag < maxPixelBag) {
-            pixelBag++;
-            updatePixelBagDisplay();
+        if (pixelBag >= maxPixelBag) {
+            updateRefillETA();
+            return;
         }
-    }, CONFIG.PIXEL_REFILL_RATE * 1000);
+        if (bagNextPixelIn > 0) bagNextPixelIn--;
+        if (bagNextPixelIn <= 0) {
+            syncPixelBag();
+        }
+        updateRefillETA();
+    }, 1000);
 }
 
 function updatePixelBagDisplay() {
@@ -392,7 +437,6 @@ function updatePixelBagDisplay() {
 
 // Estimate refill ETA (client-side heuristic; server authoritative on bag size)
 function updateRefillETA() {
-    // Requires CONFIG.PIXEL_REFILL_RATE seconds per pixel
     const etaEl = document.getElementById('pixelRefillEta');
     if (!etaEl) return;
     if (pixelBag >= maxPixelBag) {
@@ -400,12 +444,34 @@ function updateRefillETA() {
         etaEl.className = 'refill-eta full';
         return;
     }
-    const missing = maxPixelBag - pixelBag;
-    const seconds = missing * CONFIG.PIXEL_REFILL_RATE;
-    let txt;
-    if (seconds < 60) txt = `${seconds}s`; else if (seconds < 3600) txt = `${Math.floor(seconds/60)}m ${seconds%60|0}s`; else txt = `${Math.floor(seconds/3600)}h`;
-    etaEl.textContent = `~${txt}`;
-    etaEl.className = 'refill-eta';
+    if (bagNextPixelIn > 0) {
+        etaEl.textContent = bagNextPixelIn + 's';
+    } else {
+        etaEl.textContent = 'sync';
+    }
+    etaEl.className = 'refill-eta ticking';
+}
+
+async function syncPixelBag() {
+    if (!authToken) return;
+    try {
+        const r = await fetch('/api/pixel_bag/sync', { headers: { 'Authorization': `Bearer ${authToken}` }});
+        if (!r.ok) {
+            if (r.status === 401 || r.status === 403) {
+                console.warn('Pixel bag sync unauthorized, stopping further sync attempts');
+                clearInterval(bagRefillInterval);
+            }
+            return;
+        }
+        const data = await r.json();
+        pixelBag = data.pixel_bag_size;
+        maxPixelBag = data.max_pixel_bag_size;
+        bagNextPixelIn = data.next_pixel_in;
+        bagFullEta = data.full_refill_eta;
+        updatePixelBagDisplay();
+    } catch (e) {
+        console.warn('Pixel bag sync failed', e);
+    }
 }
 
 function updateVisibleRegions() {
@@ -757,20 +823,63 @@ function renderCanvas() {
         }
     }
 
-    // Draw all pixels that are visible
+    // Draw base pixels & collect those with effects for second pass
+    const effectPixels = [];
     for (const [pixelKey, pixel] of pixelData.entries()) {
         const [x, y] = pixelKey.split(',').map(Number);
-
-        // Check if pixel is in viewport
-        if (x >= leftX && x < leftX + viewWidth &&
-            y >= topY && y < topY + viewHeight) {
-
+        if (x >= leftX && x < leftX + viewWidth && y >= topY && y < topY + viewHeight) {
             const screenX = (x - leftX) * zoom;
             const screenY = (y - topY) * zoom;
-
             ctx.fillStyle = pixel.color;
             ctx.fillRect(screenX, screenY, zoom, zoom);
+            if (pixel.effect === 'glow' || pixel.effect === 'spark') {
+                effectPixels.push({x,y,screenX,screenY,pixel});
+            }
         }
+    }
+
+    if (effectPixels.length) {
+        const time = performance.now() * 0.001;
+        // Glow halos
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (const ep of effectPixels) {
+            if (ep.pixel.effect !== 'glow') continue;
+            const radius = zoom * 2.3;
+            const cx = ep.screenX + zoom/2;
+            const cy = ep.screenY + zoom/2;
+            const grad = ctx.createRadialGradient(cx, cy, zoom*0.2, cx, cy, radius);
+            grad.addColorStop(0, hexToRgba(ep.pixel.color, 0.85));
+            grad.addColorStop(0.4, hexToRgba(ep.pixel.color, 0.35));
+            grad.addColorStop(1, hexToRgba(ep.pixel.color, 0));
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI*2);
+            ctx.fill();
+        }
+        ctx.restore();
+        // Spark twinkles
+        ctx.save();
+        for (const ep of effectPixels) {
+            if (ep.pixel.effect !== 'spark') continue;
+            const phase = (Math.sin((ep.x*31 + ep.y*17) + time*6) + 1)/2; // 0..1
+            if (phase < 0.45) continue;
+            const intensity = (phase - 0.45) / 0.55; // 0..1
+            const size = Math.max(1, Math.min(zoom, zoom*0.5 + intensity*zoom*0.6));
+            const sx = ep.screenX + zoom/2;
+            const sy = ep.screenY + zoom/2;
+            ctx.globalAlpha = 0.4 + 0.6*intensity;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(sx - size/2, sy - size/2, size, size);
+            if (zoom > 6) {
+                ctx.globalAlpha = 0.2 + 0.5*intensity;
+                ctx.strokeStyle = ep.pixel.color;
+                ctx.lineWidth = 1;
+                ctx.strokeRect(ep.screenX - 0.5, ep.screenY - 0.5, zoom + 1, zoom + 1);
+            }
+        }
+        ctx.globalAlpha = 1;
+        ctx.restore();
     }
 
     // Draw preview pixels (bulk mode) with adaptive complexity for performance
@@ -866,6 +975,17 @@ function handleMessage(data) {
             // Now that we're authenticated, we can start using the canvas
             // Load achievements from backend and merge with local (union)
             currentUsername = data.user.username;
+            // Economy / XP initial sync
+            updateEconomyFromPayload(data.user);
+            // Pixel bag initial snapshot
+            if (data.user.pixel_bag_size !== undefined) {
+                pixelBag = data.user.pixel_bag_size;
+                maxPixelBag = data.user.max_pixel_bag_size;
+                bagNextPixelIn = data.user.next_pixel_in ?? CONFIG.PIXEL_REFILL_RATE;
+                bagFullEta = data.user.full_refill_eta ?? 0;
+                startPixelBagSystem({ pixel_bag_size: pixelBag, max_pixel_bag_size: maxPixelBag });
+                updatePixelBagDisplay();
+            }
             fetch('/api/achievements', { headers: { 'Authorization': `Bearer ${authToken}` }})
                 .then(r => r.json())
                 .then(serverData => {
@@ -889,7 +1009,7 @@ function handleMessage(data) {
             break;
         case 'pixel_update':
             console.log('DEBUG: Processing pixel_update:', data);
-            updatePixel(data.x, data.y, data.color);
+            updatePixel(data.x, data.y, data.color, data.effect);
             
             // Track pixel placement for achievements (only if it's the current user)
             if (data.user_id === currentUsername) {
@@ -901,7 +1021,7 @@ function handleMessage(data) {
             // New optimized batch update
             if (Array.isArray(data.updates)) {
                 for (const upd of data.updates) {
-                    updatePixel(upd.x, upd.y, upd.color);
+                    updatePixel(upd.x, upd.y, upd.color, upd.effect);
                     if (upd.user_id === currentUsername) {
                         pixelsPlacedCount++;
                     }
@@ -909,15 +1029,43 @@ function handleMessage(data) {
                 achievementCountChanged();
             }
             break;
+        case 'reward_scale_update':
+            // Update reward scale indicator live without waiting for poll
+            if (typeof data.scale_percent === 'number') {
+                const pct = data.scale_percent;
+                const ring = document.getElementById('rsFill');
+                const txt = document.getElementById('rsText');
+                if (ring) {
+                    const deg = (pct/100)*360;
+                    ring.style.background = `conic-gradient(var(--success) 0deg, var(--warning) ${deg*0.6}deg, var(--error) ${deg}deg, rgba(255,255,255,0.1) ${deg}deg 360deg)`;
+                }
+                if (txt) txt.textContent = pct + '%';
+            }
+            break;
         case 'pixel_bag_update':
             console.log('📦 Received pixel bag update:', data);
             pixelBag = data.pixel_bag_size;
             maxPixelBag = data.max_pixel_bag_size;
+            bagNextPixelIn = data.next_pixel_in ?? CONFIG.PIXEL_REFILL_RATE;
+            bagFullEta = data.full_refill_eta ?? bagFullEta;
             updatePixelBagDisplay();
             updateRefillETA();
+            // Optional economy fields piggyback
+            updateEconomyFromPayload(data);
+            break;
+        case 'level_up':
+            if (data.user_id === currentUsername) {
+                addSystemMessage(`🎉 Level Up! Agora nível ${data.new_level} (+${(data.levels||[]).map(l=>l.coin_reward).reduce((a,b)=>a+b,0)} coins)`);
+                flashEconomyBar();
+            } else {
+                addSystemMessage(`🎉 ${data.user_id} subiu para nível ${data.new_level}`);
+            }
+            updateEconomyFromPayload(data);
             break;
         case 'bulk_complete':
             console.log(`🚀 Bulk placement complete: ${data.placed}/${data.requested} pixels placed (available at start: ${data.available_at_start})`);
+            // Update economy/XP if present in summary
+            updateEconomyFromPayload(data);
             
             // Track bulk placement for achievements
             if (data.placed > 0) {
@@ -976,6 +1124,11 @@ function handleMessage(data) {
         case 'error':
             addSystemMessage(`Error: ${data.message}`);
             break;
+        case 'new_item_unlocked':
+            handleNewItemUnlocked(data);
+            break;
+        case 'reward_scale_update': // already handled earlier but guard if duplicated
+            break;
     }
 }
 
@@ -1032,8 +1185,8 @@ async function loadRegionPixels(regionX, regionY) {
     }
 }
 
-function updatePixel(globalX, globalY, color) {
-    console.log('DEBUG: Updating pixel at', globalX, globalY, 'with color', color);
+function updatePixel(globalX, globalY, color, effect) {
+    console.log('DEBUG: Updating pixel at', globalX, globalY, 'with color', color, 'effect', effect);
     
     // Calculate which region this pixel belongs to
     const regionX = Math.floor(globalX / CONFIG.REGION_SIZE);
@@ -1048,14 +1201,136 @@ function updatePixel(globalX, globalY, color) {
     }
     
     const pixelKey = `${globalX},${globalY}`;
-    pixelData.set(pixelKey, {
-        color: color,
-        timestamp: Date.now() / 1000,
-        user_id: 'other'
-    });
+    const inferred = effect || colorEffectMap.get((color||'').toLowerCase()) || null;
+    pixelData.set(pixelKey, { color, effect: inferred, timestamp: Date.now()/1000, user_id: 'other' });
     console.log('DEBUG: Pixel stored, re-rendering canvas. Total pixels:', pixelData.size);
     renderCanvas();
 }
+
+function hexToRgba(hex, alpha) {
+    if (!hex) return `rgba(255,255,255,${alpha||1})`;
+    let h = hex.replace('#','');
+    if (h.length === 3) h = h.split('').map(c=>c+c).join('');
+    const num = parseInt(h,16);
+    const r = (num>>16)&255, g=(num>>8)&255, b=num&255;
+    return `rgba(${r},${g},${b},${alpha})`;
+}
+
+let animatingEffects = false;
+function startEffectsLoop() {
+    if (animatingEffects) return; animatingEffects = true;
+    function step(){
+        // Quick check: any pixel with effect?
+        let has = false; for (const p of pixelData.values()) { if (p.effect) { has = true; break; } }
+        if (has) renderCanvas();
+        requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+}
+if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', startEffectsLoop); } else { startEffectsLoop(); }
+
+// ================== Admin Panel Logic ==================
+function openAdminPanel(){
+    const panel = document.getElementById('adminPanel');
+    if(panel) panel.style.display='block';
+    // load data
+    adminLoadItems();
+    adminLoadBoxes();
+    // Show default tab (items)
+    document.querySelectorAll('#adminPanel .admin-tab').forEach(t=>t.style.display='none');
+    const def = document.getElementById('adminItems'); if(def) def.style.display='block';
+    document.querySelectorAll('#adminPanel .admin-tab-link').forEach(b=>b.classList.remove('active'));
+    const firstBtn = document.querySelector('#adminPanel .admin-tab-link[data-target="adminItems"]'); if(firstBtn) firstBtn.classList.add('active');
+}
+function adminBind(){
+    document.querySelectorAll('.admin-tab-link').forEach(btn=>{
+        btn.addEventListener('click', ()=>{
+            const target = btn.getAttribute('data-target');
+            document.querySelectorAll('.admin-tab').forEach(t=>t.style.display='none');
+            const el = document.getElementById(target); if(el) el.style.display='block';
+            document.querySelectorAll('.admin-tab-link').forEach(b=>b.classList.remove('active'));
+            btn.classList.add('active');
+        });
+    });
+    const itemForm = document.getElementById('adminItemForm');
+    if(itemForm){
+        itemForm.addEventListener('submit', async e=>{
+            e.preventDefault();
+            const fd = new FormData(itemForm);
+            const payload = {
+                id: fd.get('id'),
+                type: fd.get('type'),
+                name: fd.get('name'),
+                rarity: fd.get('rarity'),
+                payload: {},
+                tags: (fd.get('tags')||'').split(',').map(t=>t.trim()).filter(Boolean)
+            };
+            const pc = fd.get('payload_color'); if(pc) payload.payload.color = pc;
+            const pe = fd.get('payload_effect'); if(pe) payload.payload.effect = pe;
+            const r = await fetch('/api/loot/admin/item/upsert',{method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`}, body: JSON.stringify(payload)});
+            if(r.ok){ adminLoadItems(); itemForm.reset(); }
+        });
+    }
+    const boxForm = document.getElementById('adminBoxForm');
+    if(boxForm){
+        boxForm.addEventListener('submit', async e=>{
+            e.preventDefault();
+            const fd = new FormData(boxForm);
+            function parseDrops(str){
+                return (str||'').split(';').map(s=>s.trim()).filter(Boolean).map(pair=>{const [item_id, weight] = pair.split(':'); return {item_id:item_id.trim(), weight: parseInt(weight||'1')};});
+            }
+            let rarity_bonus = {}; try { rarity_bonus = JSON.parse(fd.get('rarity_bonus')||'{}'); } catch(_){ }
+            const payload = {
+                id: fd.get('id'), name: fd.get('name'), price_coins: parseInt(fd.get('price_coins')||'0'), drops: parseDrops(fd.get('drops')), guaranteed: (fd.get('guaranteed')||'').split(',').map(t=>t.trim()).filter(Boolean), rarity_bonus, max_rolls: parseInt(fd.get('max_rolls')||'1')
+            };
+            const r = await fetch('/api/loot/admin/box/upsert',{method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`}, body: JSON.stringify(payload)});
+            if(r.ok){ adminLoadBoxes(); boxForm.reset(); }
+        });
+    }
+    const btnExport = document.getElementById('btnExportLoot');
+    if(btnExport){
+        btnExport.addEventListener('click', async ()=>{
+            const r = await fetch('/api/loot/admin/export',{headers:{'Authorization':`Bearer ${authToken}`}});
+            if(r.ok){ const data = await r.json(); document.getElementById('lootExportArea').value = JSON.stringify(data, null, 2); }
+        });
+    }
+    const btnImport = document.getElementById('btnImportLoot');
+    if(btnImport){
+        btnImport.addEventListener('click', async ()=>{
+            const txt = document.getElementById('lootImportArea').value;
+            try{
+                const parsed = JSON.parse(txt);
+                const r = await fetch('/api/loot/admin/import',{method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`}, body: JSON.stringify(parsed)});
+                const status = document.getElementById('lootImportStatus');
+                if(r.ok){ const data = await r.json(); status.textContent = `Imported items:${data.imported_items} boxes:${data.imported_boxes}`; adminLoadItems(); adminLoadBoxes(); }
+                else status.textContent = 'Import failed';
+            }catch(e){ document.getElementById('lootImportStatus').textContent = 'Invalid JSON'; }
+        });
+    }
+}
+function adminLoadItems(){
+    fetch('/api/items', {headers:{'Authorization':`Bearer ${authToken}`}}).then(r=>r.json()).then(data=>{
+        const list = document.getElementById('adminItemsList'); if(!list) return; list.innerHTML='';
+        (data.items||[]).forEach(it=>{
+            const row = document.createElement('div'); row.className='admin-row';
+            row.innerHTML = `<code>${it.id}</code> <span>${it.name}</span> <small>${it.type}/${it.rarity}</small> ${it.payload?.color?`<span style='background:${it.payload.color};display:inline-block;width:16px;height:16px;border:1px solid #000;'></span>`:''} <button data-id='${it.id}'>Del</button>`;
+            row.querySelector('button').addEventListener('click', async ()=>{ if(confirm('Delete item?')){ const r= await fetch('/api/loot/admin/item/'+it.id,{method:'DELETE', headers:{'Authorization':`Bearer ${authToken}`}}); if(r.ok) adminLoadItems(); }});
+            list.appendChild(row);
+        });
+    });
+}
+function adminLoadBoxes(){
+    fetch('/api/loot/boxes', {headers:{'Authorization':`Bearer ${authToken}`}}).then(r=>r.json()).then(data=>{
+        const list = document.getElementById('adminBoxesList'); if(!list) return; list.innerHTML='';
+        (data.boxes||[]).forEach(b=>{
+            const row = document.createElement('div'); row.className='admin-row';
+            row.innerHTML = `<code>${b.id}</code> <span>${b.name}</span> <small>${b.price_coins}c</small> <button data-id='${b.id}'>Del</button>`;
+            row.querySelector('button').addEventListener('click', async ()=>{ if(confirm('Delete box?')){ const r= await fetch('/api/loot/admin/box/'+b.id,{method:'DELETE', headers:{'Authorization':`Bearer ${authToken}`}}); if(r.ok) adminLoadBoxes(); }});
+            list.appendChild(row);
+        });
+    });
+}
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded', adminBind);} else { adminBind(); }
 
 function updateUserCount(count) {
     userCount = count;
@@ -2208,6 +2483,135 @@ function updateUserInterface() {
     }
 }
 
+// ==================== ECONOMY & LOOT ====================
+function updateEconomyFromPayload(p) {
+    if (!p) return;
+    if (typeof p.coins === 'number') {
+        const coinEl = document.getElementById('coinBalance');
+        if (coinEl) coinEl.textContent = p.coins;
+    }
+    const level = p.user_level ?? p.level;
+    if (typeof level === 'number') {
+        const lvlBadge = document.getElementById('levelBadge');
+        if (lvlBadge) lvlBadge.textContent = `Lv.${level}`;
+    }
+    if (typeof p.experience_points === 'number' && typeof p.xp_to_next === 'number') {
+        const xpFill = document.getElementById('xpFill');
+        const xpText = document.getElementById('xpText');
+        const cur = p.experience_points;
+        const toNext = p.xp_to_next || 1;
+        const pct = Math.min(100, (cur / toNext) * 100);
+        if (xpFill) xpFill.style.width = pct + '%';
+        if (xpText) xpText.textContent = `${cur}/${toNext}`;
+    }
+}
+
+function openLootBoxesModal() {
+    const modal = document.getElementById('lootModal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    loadLootBoxes();
+}
+function closeLootBoxesModal() {
+    const modal = document.getElementById('lootModal');
+    if (modal) modal.style.display = 'none';
+}
+
+async function loadLootBoxes() {
+    const list = document.getElementById('lootBoxesList');
+    if (!list) return;
+    list.innerHTML = 'Loading...';
+    try {
+        const r = await fetch('/api/loot/boxes');
+        const data = await r.json();
+        const boxes = data.boxes || [];
+        if (!boxes.length) { list.innerHTML = '<div style="opacity:.6;">No boxes</div>'; return; }
+        list.innerHTML = '';
+        boxes.forEach(b => {
+            const div = document.createElement('div');
+            div.className = 'loot-box-card';
+            div.innerHTML = `
+                <h4>${escapeHtml(b.name)}</h4>
+                <div class="price"><span class="material-symbols-rounded" style="font-size:16px;">paid</span>${b.price_coins}</div>
+                <div class="drops" style="font-size:11px; line-height:1.3; max-height:60px; overflow:auto;">
+                    ${(b.drops||[]).slice(0,8).map(d=>escapeHtml(d.item_id)).join(', ')}${(b.drops||[]).length>8?'…':''}
+                </div>
+                <button onclick="openLootBox('${b.id}', this)">Open</button>
+            `;
+            list.appendChild(div);
+        });
+    } catch(e) {
+        list.innerHTML = '<div style="color:#ef4444;">Failed to load boxes</div>';
+    }
+}
+
+async function openLootBox(boxId, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Opening...'; }
+    const resultEl = document.getElementById('lootResult');
+    if (resultEl) { resultEl.style.display='block'; resultEl.innerHTML = 'Opening...'; }
+    try {
+        const r = await fetch('/api/loot/open', { method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`}, body: JSON.stringify({ box_id: boxId }) });
+        if (!r.ok) {
+            const err = await r.json();
+            throw new Error(err.detail || 'Open failed');
+        }
+        const data = await r.json();
+        updateEconomyFromPayload(data);
+        const awarded = [...(data.guaranteed||[]), ...(data.awarded||[])];
+        let cards = awarded.map(it => {
+            const r = String(it.rarity||'common').toLowerCase();
+            const bgClass = `rarity-${r}-bg`;
+            const textClass = `rarity-${r}`;
+            return `<div class="loot-card ${bgClass}" style="padding:10px 12px; border-radius:14px; position:relative; display:flex; flex-direction:column; gap:4px; box-shadow:0 4px 18px -4px rgba(0,0,0,.6);">
+                <span class="loot-item-name ${textClass}" style="font-weight:600; font-size:14px;">${escapeHtml(it.name||it.item_id)}</span>
+                <span style="font-size:11px; opacity:.75; letter-spacing:.5px;">${r.toUpperCase()}</span>
+            </div>`;
+        }).join('');
+        if (!cards) cards = '<div style="opacity:.6;">Nothing?</div>';
+        if (resultEl) {
+            resultEl.classList.add('loot-opening-animation');
+            resultEl.innerHTML = `
+                <div style="display:flex; flex-wrap:wrap; gap:10px;">${cards}</div>
+                <div style="margin-top:10px; font-size:11px; opacity:.7;">Coins left: ${data.coins}</div>`;
+            setTimeout(()=>resultEl.classList.remove('loot-opening-animation'), 2200);
+        }
+        flashEconomyBar();
+        // Duplicate compensation toasts
+        awarded.forEach(it => {
+            if (it.duplicate && it.compensation_coins) {
+                addSystemMessage(`💱 Duplicate ${it.name||it.item_id}: +${it.compensation_coins} coins`);
+            }
+        });
+        // Rebuild palette (new colors)
+        rebuildOwnedColors();
+    } catch(e) {
+        if (resultEl) resultEl.innerHTML = `<span style='color:#f87171;'>${escapeHtml(e.message)}</span>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Open'; }
+    }
+}
+
+function flashEconomyBar() {
+    const bar = document.getElementById('economySidebar');
+    if (!bar) return;
+    bar.style.transition = 'box-shadow .4s';
+    const orig = bar.style.boxShadow || '';
+    bar.style.boxShadow = '0 0 0 3px rgba(255,255,255,0.4),0 4px 20px -4px rgba(0,0,0,0.4)';
+    setTimeout(()=>{ if(bar) bar.style.boxShadow=orig; }, 450);
+}
+
+function handleNewItemUnlocked(data) {
+    // Show toast for rare unlocks
+    const container = document.getElementById('achievementToasts');
+    if (!container || !data.item) return;
+    const t = document.createElement('div');
+    const rarity = (data.item.rarity||'').toLowerCase();
+    t.className = `item-unlock-toast ${rarity}`;
+    t.innerHTML = `<strong>${escapeHtml(data.user_id)}</strong> unlocked <span class='rarity-${rarity}'>${escapeHtml(data.item.name||data.item.item_id)}</span>`;
+    container.appendChild(t);
+    setTimeout(()=>{ if(t.parentNode) t.remove(); }, 6000);
+}
+
 async function logout() {
     try {
         // Logout via cookie-based API
@@ -2817,7 +3221,8 @@ function closeTutorial() {
 }
 
 function nextStep() {
-    if (currentTutorialStep < 5) {
+    const TOTAL_STEPS = 7;
+    if (currentTutorialStep < TOTAL_STEPS) {
         currentTutorialStep++;
         updateTutorialStep();
     } else {
@@ -2832,28 +3237,20 @@ function previousStep() {
     }
 }
 
-function goToStep(step) {
-    currentTutorialStep = step;
-    updateTutorialStep();
-}
+function goToStep(step) { currentTutorialStep = step; updateTutorialStep(); }
 
 function updateTutorialStep() {
-    // Hide all steps
-    document.querySelectorAll('.tutorial-step').forEach(step => {
-        step.classList.remove('active');
-    });
-    
-    // Show current step
-    document.getElementById(`step${currentTutorialStep}`).classList.add('active');
-    
-    // Update dots
+    const TOTAL_STEPS = 7;
+    document.querySelectorAll('.tutorial-step').forEach(step => step.classList.remove('active'));
+    const cur = document.getElementById(`step${currentTutorialStep}`);
+    if (cur) cur.classList.add('active');
     document.querySelectorAll('.dot').forEach((dot, index) => {
         dot.classList.toggle('active', index + 1 === currentTutorialStep);
     });
-    
-    // Update navigation buttons
-    document.getElementById('prevBtn').disabled = currentTutorialStep === 1;
-    document.getElementById('nextBtn').textContent = currentTutorialStep === 5 ? 'Finish' : 'Next';
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    if (prevBtn) prevBtn.disabled = currentTutorialStep === 1;
+    if (nextBtn) nextBtn.textContent = currentTutorialStep === TOTAL_STEPS ? 'Finish' : 'Next';
 }
 
 // ==================== PROFILE SYSTEM ====================
