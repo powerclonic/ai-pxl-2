@@ -1,5 +1,4 @@
 let colorEffectMap = new Map(); // Map color hex -> effect name (glow, spark) gathered from owned colors list
-    colorEffectMap = new Map();
 // Global variables
 let ws = null;
 let canvas = null; // Will be initialized when DOM is ready
@@ -232,6 +231,23 @@ async function init() {
     }
 }
 
+// Centralized event listener setup (previously missing causing ReferenceError)
+function setupEventListeners(){
+    if(!canvas) return;
+    // Mouse core
+    canvas.addEventListener('mousedown', handleMouseDown);
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mouseup', handleMouseUp);
+    canvas.addEventListener('mouseleave', handleMouseLeave);
+    canvas.addEventListener('click', handleCanvasClick, true);
+    canvas.addEventListener('wheel', handleWheel, { passive:false });
+    // Keyboard
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    // Visibility (pause heavy ops if desired later)
+    document.addEventListener('visibilitychange', ()=>{ /* placeholder for future pause/resume */ });
+}
+
 function setupCanvas() {
     if (!canvas || !ctx) {
         console.error('Canvas or context not available in setupCanvas');
@@ -310,40 +326,35 @@ function zoomToCenter() {
 }
 
 function setupColorPalette() {
-    rebuildOwnedColors();
-}
-
-async function rebuildOwnedColors() {
+    // Show placeholder base palette; real owned colors load only after auth.
     const colorGrid = document.getElementById('colorGrid');
     if (!colorGrid) return;
-    colorGrid.innerHTML = '';
-    try {
-        const r = await fetch('/api/inventory/colors', { headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {} });
-        if (r.ok) {
-            const data = await r.json();
-            const list = data.colors || [];
-            list.forEach((c, idx) => {
-                const btn = document.createElement('div');
-                btn.className = 'color-btn';
-            if (c.effect === 'glow' || (c.tags||[]).includes('effect:glow')) { btn.classList.add('effect-glow'); colorEffectMap.set(c.color.toLowerCase(), 'glow'); }
-            if (c.effect === 'spark' || (c.tags||[]).includes('effect:spark')) { btn.classList.add('effect-spark'); colorEffectMap.set(c.color.toLowerCase(), 'spark'); }
-                if (idx === 0) btn.classList.add('selected');
-                btn.style.backgroundColor = c.color;
-                btn.title = `${c.name} (${c.rarity})`;
-                btn.onclick = () => selectColor(c.color, btn);
-                colorGrid.appendChild(btn);
-            });
-        }
-    } catch(e) {
-        console.warn('Failed loading owned colors', e);
-    }
+    colorGrid.innerHTML='';
+    const placeholder = [
+        '#FF0000','#00FF00','#0000FF','#FFFF00','#FF00FF','#00FFFF',
+        '#FFFFFF','#000000','#800000','#008000','#000080','#808000',
+        '#800080','#008080','#C0C0C0','#808080'
+    ];
+    placeholder.forEach((col, idx)=>{
+        const btn = document.createElement('div');
+        btn.className='color-btn placeholder';
+        if(idx===0) btn.classList.add('selected');
+        btn.style.backgroundColor=col;
+        btn.title='Login to load owned colors';
+        btn.onclick=()=>selectColor(col, btn);
+        colorGrid.appendChild(btn);
+    });
+    // Owned colors fetched later by loadOwnedColors() after auth success.
 }
 
 // Reward scaling indicator logic
 let rewardScaleLastFetch = 0;
+let rewardScaleIntervalId = null; // started only after auth
 async function updateRewardScaleIndicator() {
     const now = Date.now();
     if (now - rewardScaleLastFetch < 3000) return; // throttle 3s
+    // Skip if not authenticated to avoid 403 spam on server logs
+    if (!authToken) return;
     rewardScaleLastFetch = now;
     try {
         const r = await fetch('/api/reward/scale', { headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {} });
@@ -359,12 +370,84 @@ async function updateRewardScaleIndicator() {
         if (txt) txt.textContent = pct + '%';
     } catch(e) { /* silent */ }
 }
-setInterval(updateRewardScaleIndicator, 3500);
+// Interval started after authentication succeeds (see checkAuthenticationStatus)
+// (Removed early setInterval to avoid unauthenticated calls)
 
-function selectColor(color, element) {
+// Provide missing handler referenced in setupEventListeners (defined once below)
+function handleMouseLeave(e){
+    if (isDragging) { isDragging = false; wasDragging = false; }
+    if (typeof hidePixelPreview === 'function') { try { hidePixelPreview(); } catch(_){} }
+}
+
+// Extracted loader for owned colors (was inline earlier)
+async function loadOwnedColors(){
+    try {
+        if(!authToken) return; // require auth
+        const colorGrid = document.getElementById('colorGrid');
+        if (colorGrid){
+            colorGrid.innerHTML = `<div class="color-loading"><div class="spinner"></div><span>Carregando cores...</span></div>`;
+        }
+        const r = await fetch('/api/inventory/colors', { headers: { 'Authorization': `Bearer ${authToken}` }});
+        if(!r.ok) return;
+        const data = await r.json();
+        if (!colorGrid) return;
+        colorGrid.innerHTML='';
+        let list = data.colors || [];
+        if(!Array.isArray(list) || list.length===0){
+            list = [];
+        }
+        const basicIfEmpty = list.length===0;
+        if(basicIfEmpty){
+            list = [
+                {color:'#FF0000', name:'Basic Red', rarity:'COMMON'},
+                {color:'#00FF00', name:'Basic Green', rarity:'COMMON'},
+                {color:'#0000FF', name:'Basic Blue', rarity:'COMMON'},
+                {color:'#FFFF00', name:'Basic Yellow', rarity:'COMMON'},
+                {color:'#FF00FF', name:'Basic Magenta', rarity:'COMMON'},
+                {color:'#00FFFF', name:'Basic Cyan', rarity:'COMMON'},
+                {color:'#FFFFFF', name:'Basic White', rarity:'COMMON'},
+                {color:'#000000', name:'Basic Black', rarity:'COMMON'},
+                {color:'#800000', name:'Basic Maroon', rarity:'COMMON'},
+                {color:'#008000', name:'Basic DarkGreen', rarity:'COMMON'},
+                {color:'#000080', name:'Basic Navy', rarity:'COMMON'},
+                {color:'#808000', name:'Basic Olive', rarity:'COMMON'},
+                {color:'#800080', name:'Basic Purple', rarity:'COMMON'},
+                {color:'#008080', name:'Basic Teal', rarity:'COMMON'},
+                {color:'#C0C0C0', name:'Basic Silver', rarity:'COMMON'},
+                {color:'#808080', name:'Basic Gray', rarity:'COMMON'}
+            ];
+        }
+        // Track previous colors across reloads to detect newly unlocked
+        if(!window._prevOwnedColors) window._prevOwnedColors = new Set();
+        const prev = window._prevOwnedColors;
+        const newly = [];
+        list.forEach((c)=>{ if (c && c.color && !prev.has(c.color.toLowerCase())) newly.push(c.color.toLowerCase()); });
+
+        list.forEach((c, idx)=>{
+            const btn = document.createElement('div');
+            btn.className='color-btn';
+            if (c.effect === 'glow' || (c.tags||[]).includes('effect:glow')) { btn.classList.add('effect-glow'); colorEffectMap.set(c.color.toLowerCase(), 'glow'); }
+            if (c.effect === 'spark' || (c.tags||[]).includes('effect:spark')) { btn.classList.add('effect-spark'); colorEffectMap.set(c.color.toLowerCase(), 'spark'); }
+            if(idx===0) btn.classList.add('selected');
+            btn.style.backgroundColor=c.color;
+            btn.title=`${c.name} (${c.rarity})`;
+            btn.onclick=()=>selectColor(c.color, btn);
+            if (newly.includes(c.color.toLowerCase())) {
+                btn.classList.add('new-color');
+                // Remove highlight after a few seconds
+                setTimeout(()=>btn.classList.remove('new-color'), 6000);
+            }
+            colorGrid.appendChild(btn);
+        });
+        // Update previous set
+        list.forEach(c=>{ if(c && c.color) prev.add(c.color.toLowerCase()); });
+    } catch(e){ console.warn('Failed loading owned colors', e); }
+}
+
+function selectColor(color, element){
     selectedColor = color;
-    document.querySelectorAll('.color-btn').forEach(btn => btn.classList.remove('selected'));
-    element.classList.add('selected');
+    document.querySelectorAll('.color-btn').forEach(btn=>btn.classList.remove('selected'));
+    if(element) element.classList.add('selected');
 }
 
 function toggleColorPalette() {
@@ -1134,17 +1217,18 @@ function handleMessage(data) {
 
 function loadRegionData(data) {
     // Store pixels from main region data
-    Object.entries(data.pixels).forEach(([coords, pixel]) => {
-        const [localX, localY] = coords.split(',').map(Number);
-        const globalX = data.region_x * CONFIG.REGION_SIZE + localX;
-        const globalY = data.region_y * CONFIG.REGION_SIZE + localY;
-        const pixelKey = `${globalX},${globalY}`;
-
-        pixelData.set(pixelKey, {
-            color: pixel.color,
-            timestamp: pixel.timestamp,
-            user_id: pixel.user_id
-        });
+        Object.entries(data.pixels).forEach(([coords, pixel]) => {
+            const [localX, localY] = coords.split(',').map(Number);
+            const globalX = data.region_x * CONFIG.REGION_SIZE + localX;
+            const globalY = data.region_y * CONFIG.REGION_SIZE + localY;
+            const pixelKey = `${globalX},${globalY}`;
+        
+            pixelData.set(pixelKey, {
+                color: pixel.color,
+                timestamp: pixel.timestamp,
+                user_id: pixel.user_id,
+                effect: pixel.effect || (pixel.color ? colorEffectMap.get(pixel.color.toLowerCase()) : null) || null
+            });
     });
 
     // Update user count
@@ -1175,7 +1259,8 @@ async function loadRegionPixels(regionX, regionY) {
                 pixelData.set(pixelKey, {
                     color: pixel.color,
                     timestamp: pixel.timestamp,
-                    user_id: pixel.user_id
+                    user_id: pixel.user_id,
+                    effect: pixel.effect || (pixel.color ? colorEffectMap.get(pixel.color.toLowerCase()) : null) || null
                 });
             });
             renderCanvas();
@@ -1253,40 +1338,9 @@ function adminBind(){
         });
     });
     const itemForm = document.getElementById('adminItemForm');
-    if(itemForm){
-        itemForm.addEventListener('submit', async e=>{
-            e.preventDefault();
-            const fd = new FormData(itemForm);
-            const payload = {
-                id: fd.get('id'),
-                type: fd.get('type'),
-                name: fd.get('name'),
-                rarity: fd.get('rarity'),
-                payload: {},
-                tags: (fd.get('tags')||'').split(',').map(t=>t.trim()).filter(Boolean)
-            };
-            const pc = fd.get('payload_color'); if(pc) payload.payload.color = pc;
-            const pe = fd.get('payload_effect'); if(pe) payload.payload.effect = pe;
-            const r = await fetch('/api/loot/admin/item/upsert',{method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`}, body: JSON.stringify(payload)});
-            if(r.ok){ adminLoadItems(); itemForm.reset(); }
-        });
-    }
+    // legacy itemForm removed
     const boxForm = document.getElementById('adminBoxForm');
-    if(boxForm){
-        boxForm.addEventListener('submit', async e=>{
-            e.preventDefault();
-            const fd = new FormData(boxForm);
-            function parseDrops(str){
-                return (str||'').split(';').map(s=>s.trim()).filter(Boolean).map(pair=>{const [item_id, weight] = pair.split(':'); return {item_id:item_id.trim(), weight: parseInt(weight||'1')};});
-            }
-            let rarity_bonus = {}; try { rarity_bonus = JSON.parse(fd.get('rarity_bonus')||'{}'); } catch(_){ }
-            const payload = {
-                id: fd.get('id'), name: fd.get('name'), price_coins: parseInt(fd.get('price_coins')||'0'), drops: parseDrops(fd.get('drops')), guaranteed: (fd.get('guaranteed')||'').split(',').map(t=>t.trim()).filter(Boolean), rarity_bonus, max_rolls: parseInt(fd.get('max_rolls')||'1')
-            };
-            const r = await fetch('/api/loot/admin/box/upsert',{method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`}, body: JSON.stringify(payload)});
-            if(r.ok){ adminLoadBoxes(); boxForm.reset(); }
-        });
-    }
+    // legacy boxForm removed
     const btnExport = document.getElementById('btnExportLoot');
     if(btnExport){
         btnExport.addEventListener('click', async ()=>{
@@ -1311,10 +1365,12 @@ function adminBind(){
 function adminLoadItems(){
     fetch('/api/items', {headers:{'Authorization':`Bearer ${authToken}`}}).then(r=>r.json()).then(data=>{
         const list = document.getElementById('adminItemsList'); if(!list) return; list.innerHTML='';
+    window._adminItemsCache = data.items || [];
         (data.items||[]).forEach(it=>{
             const row = document.createElement('div'); row.className='admin-row';
-            row.innerHTML = `<code>${it.id}</code> <span>${it.name}</span> <small>${it.type}/${it.rarity}</small> ${it.payload?.color?`<span style='background:${it.payload.color};display:inline-block;width:16px;height:16px;border:1px solid #000;'></span>`:''} <button data-id='${it.id}'>Del</button>`;
-            row.querySelector('button').addEventListener('click', async ()=>{ if(confirm('Delete item?')){ const r= await fetch('/api/loot/admin/item/'+it.id,{method:'DELETE', headers:{'Authorization':`Bearer ${authToken}`}}); if(r.ok) adminLoadItems(); }});
+            row.innerHTML = `<code>${it.id}</code> <span>${it.name}</span> <small>${it.type}/${it.rarity}</small> ${it.payload?.color?`<span style='background:${it.payload.color};display:inline-block;width:16px;height:16px;border:1px solid #000;'></span>`:''} <button class='mini' data-act='edit'>Edit</button> <button class='mini danger' data-act='del'>Del</button>`;
+            row.querySelector('[data-act="del"]').addEventListener('click', async ()=>{ if(confirm('Delete item?')){ const r= await fetch('/api/loot/admin/item/'+it.id,{method:'DELETE', headers:{'Authorization':`Bearer ${authToken}`}}); if(r.ok) adminLoadItems(); }});
+            row.querySelector('[data-act="edit"]').addEventListener('click', ()=> openLootEditor('item', it));
             list.appendChild(row);
         });
     });
@@ -1324,52 +1380,288 @@ function adminLoadBoxes(){
         const list = document.getElementById('adminBoxesList'); if(!list) return; list.innerHTML='';
         (data.boxes||[]).forEach(b=>{
             const row = document.createElement('div'); row.className='admin-row';
-            row.innerHTML = `<code>${b.id}</code> <span>${b.name}</span> <small>${b.price_coins}c</small> <button data-id='${b.id}'>Del</button>`;
-            row.querySelector('button').addEventListener('click', async ()=>{ if(confirm('Delete box?')){ const r= await fetch('/api/loot/admin/box/'+b.id,{method:'DELETE', headers:{'Authorization':`Bearer ${authToken}`}}); if(r.ok) adminLoadBoxes(); }});
+            row.innerHTML = `<code>${b.id}</code> <span>${b.name}</span> <small>${b.price_coins}c</small> <button class='mini' data-act='edit'>Edit</button> <button class='mini danger' data-act='del'>Del</button>`;
+            row.querySelector('[data-act="del"]').addEventListener('click', async ()=>{ if(confirm('Delete box?')){ const r= await fetch('/api/loot/admin/box/'+b.id,{method:'DELETE', headers:{'Authorization':`Bearer ${authToken}`}}); if(r.ok) adminLoadBoxes(); }});
+            row.querySelector('[data-act="edit"]').addEventListener('click', ()=> openLootEditor('box', b));
             list.appendChild(row);
         });
     });
 }
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded', adminBind);} else { adminBind(); }
 
-function updateUserCount(count) {
-    userCount = count;
-    const el = document.getElementById('userCount');
-    if (el) el.textContent = `${count} users`;
+// ================== Loot Editor Modal (Items / Boxes) ==================
+let rarityTiers = [
+    {key:'common', label:'Common', color:'#b0b0b0', weight:60},
+    {key:'rare', label:'Rare', color:'#4d7dff', weight:25},
+    {key:'epic', label:'Epic', color:'#b24dff', weight:12},
+    {key:'legendary', label:'Legendary', color:'#ffae00', weight:3},
+];
+
+async function loadServerTiers(){
+    try{
+        const r = await fetch('/api/tiers');
+        if(r.ok){ const data = await r.json(); if(Array.isArray(data.tiers) && data.tiers.length){ rarityTiers = data.tiers; populateRaritySelect(); } }
+    }catch(_){ /* ignore */ }
+}
+loadServerTiers();
+
+function openLootEditor(mode='item', existing=null){
+    const modal = document.getElementById('lootEditorModal'); if(!modal) return; modal.style.display='block';
+    document.getElementById('lootEditorMode').value = mode;
+    document.getElementById('lootEditorTitle').textContent = existing? (mode==='item'? 'Edit Item':'Edit Box') : (mode==='item'? 'New Item':'New Box');
+    const form = document.getElementById('lootEditorForm'); form.reset();
+    populateRaritySelect();
+    lootEditorTypeChanged();
+    toggleBoxFields(mode==='box');
+    if(existing){ fillLootEditor(existing); }
+    updateLootPreview();
+}
+function closeLootEditor(){ const modal = document.getElementById('lootEditorModal'); if(modal) modal.style.display='none'; }
+function switchLootEditorMode(){
+    const current = document.getElementById('lootEditorMode').value;
+    const next = current==='item' ? 'box' : 'item';
+    openLootEditor(next);
+}
+function populateRaritySelect(){
+    const sel = document.getElementById('lootRaritySelect'); if(!sel) return; sel.innerHTML='';
+    rarityTiers.forEach(t=>{ const opt=document.createElement('option'); opt.value=t.key; opt.textContent=t.label; sel.appendChild(opt); });
+}
+function fillLootEditor(obj){
+    const form = document.getElementById('lootEditorForm'); if(!form) return;
+    // base fields
+    ['id','name','price_coins','max_rolls'].forEach(k=>{ if(obj[k]!==undefined){ const f=form.querySelector(`[name="${k}"]`); if(f) f.value=obj[k]; }});
+    if(obj.payload){
+        if(obj.payload.color){ form.querySelector('[name="payload.color"]').value = obj.payload.color; }
+        if(obj.payload.effect){ form.querySelector('[name="payload.effect"]').value = obj.payload.effect; }
+        if(obj.payload.max_pixel_bag_delta){ form.querySelector('[name="payload.max_pixel_bag_delta"]').value = obj.payload.max_pixel_bag_delta; }
+        if(obj.payload.coins){ form.querySelector('[name="payload.coins"]').value = obj.payload.coins; }
+    }
+    if(obj.tags){ form.querySelector('[name="tags"]').value = obj.tags.join(', '); }
+    if(obj.type){ form.querySelector('[name="type"]').value = obj.type; }
+    if(obj.guaranteed){ form.querySelector('[name="guaranteed"]').value = obj.guaranteed.join(','); }
+    if(obj.rarity_bonus){ form.querySelector('[name="rarity_bonus"]').value = JSON.stringify(obj.rarity_bonus); }
+    if(obj.drops){
+        clearDropRows();
+        obj.drops.forEach(d=> addDropRow(d.item_id, d.weight));
+    } else clearDropRows();
+    lootEditorTypeChanged();
+    toggleBoxFields(document.getElementById('lootEditorMode').value==='box');
+}
+function lootEditorTypeChanged(){
+    const type = document.getElementById('lootTypeSelect')?.value;
+    document.querySelectorAll('.conditional').forEach(el=>el.style.display='none');
+    if(type){ const block = document.querySelector('.field-'+type); if(block) block.style.display='block'; }
+    updateLootPreview();
+}
+function toggleBoxFields(show){
+    document.querySelectorAll('.box-only').forEach(el=> el.style.display = show? 'block':'none');
+    document.getElementById('fieldTypeWrapper').style.display = show? 'none':'block';
+    document.getElementById('lootRaritySelect').disabled = show; // boxes don't use rarity directly
+    document.getElementById('switchModeBtn').textContent = show? 'Switch to Item':'Switch to Box';
+}
+function gatherLootEditorData(){
+    const form = document.getElementById('lootEditorForm'); const mode = document.getElementById('lootEditorMode').value;
+    const fd = new FormData(form);
+    if(mode==='item'){
+        const payload = {};
+        const color = fd.get('payload.color'); if(color) payload.color = color;
+        const effect = fd.get('payload.effect'); if(effect) payload.effect = effect;
+        const bag = fd.get('payload.max_pixel_bag_delta'); if(bag) payload.max_pixel_bag_delta = parseInt(bag);
+        const coins = fd.get('payload.coins'); if(coins) payload.coins = parseInt(coins);
+        return {
+            endpoint: '/api/loot/admin/item/upsert',
+            body: {
+                id: fd.get('id'),
+                type: fd.get('type'),
+                name: fd.get('name'),
+                rarity: fd.get('rarity'),
+                payload,
+                tags: (fd.get('tags')||'').split(',').map(t=>t.trim()).filter(Boolean)
+            }
+        };
+    } else { // box
+        const guaranteed = (fd.get('guaranteed')||'').split(',').map(s=>s.trim()).filter(Boolean);
+        let rarity_bonus={}; try { rarity_bonus = JSON.parse(fd.get('rarity_bonus')||'{}'); } catch(_){ }
+        return {
+            endpoint: '/api/loot/admin/box/upsert',
+            body: {
+                id: fd.get('id'),
+                name: fd.get('name'),
+                price_coins: parseInt(fd.get('price_coins')||'0'),
+                drops: collectDropRows(),
+                guaranteed,
+                rarity_bonus,
+                max_rolls: parseInt(fd.get('max_rolls')||'1')
+            }
+        };
+    }
+}
+function rarityMeta(key){ return rarityTiers.find(r=>r.key===key) || {color:'#999', label:key}; }
+function updateLootPreview(){
+    const card = document.getElementById('lootPreviewCard'); if(!card) return;
+    const mode = document.getElementById('lootEditorMode').value;
+    const type = document.getElementById('lootTypeSelect')?.value;
+    const name = document.querySelector('#lootEditorForm [name="name"]').value || '(name)';
+    const rarity = document.querySelector('#lootEditorForm [name="rarity"]').value;
+    const rarityInfo = rarityMeta(rarity);
+    let inner = '';
+    if(mode==='item'){
+        if(type==='color'){
+            const col = document.querySelector('[name="payload.color"]').value || '#888888';
+            const eff = document.querySelector('[name="payload.effect"]').value;
+            inner = `<div class='preview-swatch' style='background:${col}; box-shadow:${eff==='glow'?`0 0 8px ${col}`:'none'}'></div>`;
+            if(eff==='spark') inner += `<div class='preview-spark'>✦</div>`;
+        } else if(type==='upgrade'){
+            const bag = document.querySelector('[name="payload.max_pixel_bag_delta"]').value || '0';
+            inner = `<div class='preview-upgrade'>Bag +${bag}</div>`;
+        } else if(type==='effect'){
+            const eff = document.querySelector('[name="payload.effect"]').value || 'effect';
+            inner = `<div class='preview-effect-tag'>${eff}</div>`;
+        } else if(type==='currency_pack'){
+            const coins = document.querySelector('[name="payload.coins"]').value || '0';
+            inner = `<div class='preview-currency'>${coins} <span class='material-symbols-rounded' style='font-size:16px;vertical-align:middle;'>paid</span></div>`;
+        }
+        card.innerHTML = `<div class='loot-preview-top' style='border-color:${rarityInfo.color}'><span class='rarity-tag' style='background:${rarityInfo.color}'>${rarityInfo.label}</span><strong>${name}</strong></div><div class='loot-preview-body'>${inner}</div>`;
+    } else {
+    const price = document.querySelector('[name="price_coins"]').value || '0';
+    const drops = collectDropRows();
+    const dropList = drops.slice(0,5).map(d=>`<li>${d.item_id}<small>x${d.weight}</small></li>`).join('') + (drops.length>5?'<li>...</li>':'');
+    card.innerHTML = `<div class='loot-preview-top' style='border-color:#555'><strong>${name}</strong><span class='price-tag'>${price}c</span></div><div class='loot-preview-body'><ul class='mini-drop-list'>${dropList||'<li>(no drops)</li>'}</ul></div>`;
+    }
+}
+document.addEventListener('input', e=>{ if(e.target.closest('#lootEditorForm')) updateLootPreview(); });
+document.addEventListener('change', e=>{ if(e.target.closest('#lootEditorForm')) updateLootPreview(); });
+
+// Explicit save handler (no form submit)
+async function saveLootEditor(){
+    const {endpoint, body} = gatherLootEditorData();
+    const mode = document.getElementById('lootEditorMode').value;
+    const err = validateLootBody(body, mode);
+    if(err){ alert('Validation: '+err); return; }
+    try {
+        const r = await fetch(endpoint,{method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`}, body: JSON.stringify(body)});
+        if(!r.ok){ const txt = await r.text(); throw new Error(txt||'Save failed'); }
+        // refresh lists according to mode
+        if(mode==='item'){ adminLoadItems(); } else { adminLoadBoxes(); }
+        closeLootEditor();
+    } catch(e){
+        console.error('Save error', e); alert('Save failed: '+e.message);
+    }
 }
 
-function setupEventListeners() {
-    if (!canvas) {
-        console.error('❌ Canvas not available in setupEventListeners');
-        return;
-    }
-    
-    console.log('🎧 Setting up event listeners...');
-    
-    // Use capture phase for click to intercept before other handlers
-    canvas.addEventListener('click', handleCanvasClick, true);
-    canvas.addEventListener('mousedown', handleMouseDown);
-    canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseup', handleMouseUp);
-    canvas.addEventListener('wheel', handleWheel);
-    canvas.addEventListener('mouseleave', () => {
-        hidePixelPreview();
-        hidePixelInfo();
+// Keyboard shortcuts: Ctrl+Alt+I new item, Ctrl+Alt+B new box (when admin modal visible)
+document.addEventListener('keydown', e=>{
+        if(e.ctrlKey && e.altKey && e.key.toLowerCase()==='i'){ if(document.getElementById('adminModal')?.style.display!=='none') { e.preventDefault(); openLootEditor('item'); } }
+        if(e.ctrlKey && e.altKey && e.key.toLowerCase()==='b'){ if(document.getElementById('adminModal')?.style.display!=='none') { e.preventDefault(); openLootEditor('box'); } }
+});
+
+// ========== Tier Editor ========== 
+function openTierEditor(){
+    const modal = document.getElementById('tierEditorModal'); if(!modal) return; modal.style.display='block';
+    renderTierRows();
+}
+function renderTierRows(){
+    const tbody = document.querySelector('#tierTable tbody'); if(!tbody) return; tbody.innerHTML='';
+    rarityTiers.forEach(t=>{
+        const tr = document.createElement('tr');
+        tr.dataset.key = t.key;
+        tr.innerHTML = `<td>${t.key}</td>`+
+            `<td><input value='${t.label}' data-field='label'></td>`+
+            `<td><input type='color' value='${t.color}' data-field='color'></td>`+
+            `<td><input type='number' min='1' value='${t.weight}' data-field='weight' style='width:70px;'></td>`+
+            `<td><button type='button' class='btn small danger' data-act='del-tier' title='Delete'>✕</button></td>`;
+        tr.querySelector('[data-act="del-tier"]').addEventListener('click', ()=>{ deleteTier(t.key); });
+        tbody.appendChild(tr);
     });
+}
+function addTier(){
+    // Generate a unique key base on pattern tierN
+    let i=1; let key;
+    do { key = 'tier'+i; i++; } while(rarityTiers.find(t=>t.key===key));
+    rarityTiers.push({key, label: key, color: '#888888', weight: 1});
+    renderTierRows();
+}
+function deleteTier(key){
+    // Prevent removal if it would leave zero tiers
+    if(rarityTiers.length<=1){ alert('At least one tier required'); return; }
+    rarityTiers = rarityTiers.filter(t=>t.key!==key);
+    renderTierRows();
+}
+function closeTierEditor(){ const m=document.getElementById('tierEditorModal'); if(m) m.style.display='none'; }
+function saveTierConfig(){
+    const rows = document.querySelectorAll('#tierTable tbody tr');
+    rows.forEach(r=>{
+        const key = r.cells[0].textContent.trim();
+        const label = r.querySelector('[data-field="label"]').value;
+        const color = r.querySelector('[data-field="color"]').value;
+        const weight = parseInt(r.querySelector('[data-field="weight"]').value)||1;
+        const tier = rarityTiers.find(t=>t.key===key); if(tier){ tier.label=label; tier.color=color; tier.weight=weight; }
+    });
+    // Persist to server
+    fetch('/api/admin/tiers',{method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`}, body: JSON.stringify({tiers: rarityTiers})})
+        .then(r=>{ if(!r.ok) throw new Error(); return r.json(); })
+        .then(()=>{ closeTierEditor(); populateRaritySelect(); updateLootPreview(); })
+        .catch(()=>{ alert('Failed to save tiers'); });
+}
 
-    console.log('✅ Canvas event listeners attached');
+// ---- Drops Builder Helpers ----
+function clearDropRows(){ const c=document.getElementById('dropRows'); if(c) c.innerHTML=''; }
+function addDropRow(item_id='', weight=1){
+    const c=document.getElementById('dropRows'); if(!c) return;
+    const row=document.createElement('div'); row.className='drops-row'; row.setAttribute('role','row');
+    // build select options from cached admin items list if present
+    const itemOptions = window._adminItemsCache ? window._adminItemsCache.map(it=>`<option value="${it.id}">${it.name||it.id}</option>`).join('') : '';
+    row.innerHTML = `<div class='cell'>
+        <select class='drop-item-id' aria-label='Item'>
+            <option value=''>-- select --</option>
+            ${itemOptions}
+        </select>
+    </div>
+    <div class='cell small'><input type='number' min='1' value='${weight}' class='drop-weight' aria-label='Weight'></div>
+    <div class='cell small'><div class='percent-badge' data-percent>0%</div></div>
+    <div class='cell action'><button type='button' class='mini' data-act='del' aria-label='Delete drop'>&times;</button></div>`;
+    const sel = row.querySelector('.drop-item-id'); sel.value = item_id;
+    row.querySelector('[data-act="del"]').addEventListener('click', ()=>{ row.remove(); updateDropsPercentages(); updateLootPreview(); });
+    row.querySelector('.drop-weight').addEventListener('input', ()=>{ updateDropsPercentages(); updateLootPreview(); });
+    row.querySelector('.drop-item-id').addEventListener('change', ()=>{ updateLootPreview(); });
+    c.appendChild(row);
+    updateDropsPercentages();
+    updateLootPreview();
+}
+function updateDropsPercentages(){
+    const rows = document.querySelectorAll('#dropRows .drops-row');
+    let total = 0; rows.forEach(r=>{ const w=parseInt(r.querySelector('.drop-weight').value)||0; total += w; });
+    rows.forEach(r=>{ const w=parseInt(r.querySelector('.drop-weight').value)||0; const pct = total? ((w/total)*100).toFixed(1):'0.0'; const badge=r.querySelector('[data-percent]'); if(badge) badge.textContent = pct+'%'; });
+}
+function collectDropRows(){
+    const rows = document.querySelectorAll('#dropRows .drops-row');
+    return Array.from(rows).map(r=>({
+        item_id: r.querySelector('.drop-item-id').value.trim(),
+        weight: parseInt(r.querySelector('.drop-weight').value)||1
+    })).filter(d=>d.item_id);
+}
 
-    document.getElementById('chatInput').addEventListener('keypress', function (e) {
-        if (e.key === 'Enter') {
-            sendChatMessage();
+function validateLootBody(body, mode){
+    if(mode==='item'){
+        if(!body.id || !body.name) return 'id/name required';
+        if(body.type==='color'){
+            const c = body.payload.color||''; if(!/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(c)) return 'Invalid color hex';
         }
-    });
+        if(body.type==='upgrade'){
+            if(!body.payload.max_pixel_bag_delta || body.payload.max_pixel_bag_delta < 1) return 'Upgrade delta must be >=1';
+        }
+    } else {
+        if(!body.id || !body.name) return 'id/name required';
+        if(body.price_coins < 0) return 'price_coins >=0';
+        if(!body.drops.length) return 'At least one drop';
+        for(const d of body.drops){ if(d.weight <=0) return 'Drop weights >0'; }
+    }
+    return null;
+}
 
-    // Bulk placement with Space key
-    document.addEventListener('keydown', handleKeyDown);
-    document.addEventListener('keyup', handleKeyUp);
-    console.log('✅ Keyboard event listeners attached (keydown, keyup)');
-
+function updateUserCount(count) {
+    userCount = count;
+// (Removed legacy admin panel logic; unified implementation below)
     // Note: Keyboard navigation removed as requested
 
     // Start ping interval
@@ -1844,12 +2136,14 @@ function placePixel(x, y, color) {
 
 function handleKeyDown(event) {
     console.log('🔑 Key down event fired:', event.code, 'key:', event.key);
-    // Only activate bulk mode if not typing in chat
-    const chatInput = document.getElementById('chatInput');
-    if (document.activeElement === chatInput) {
-        console.log('🚫 Ignoring key - typing in chat');
-        return; // Don't interfere with chat typing
+    // Ignore if focused on any text input/textarea/contenteditable element
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) {
+        return;
     }
+    // Specific legacy chat input check (kept for safety)
+    const chatInput = document.getElementById('chatInput');
+    if (document.activeElement === chatInput) return;
 
     if (event.code === 'Space' && !isBulkMode) {
         event.preventDefault(); // Prevent page scroll
@@ -2138,31 +2432,77 @@ function sendChatMessage() {
 }
 
 function addChatMessage(userId, message, timestamp, userData = null, scroll = true) {
-    const chatMessages = document.getElementById('chatMessages');
     const messageDiv = document.createElement('div');
-    messageDiv.className = 'message chat';
+    messageDiv.className = 'chat-message';
 
-    const time = new Date(timestamp * 1000).toLocaleTimeString();
-    
-    // Create username display with level badge
-    let userDisplay = userId;
+    // Username + optional level badge, clickable
+    let levelBadge = '';
+    let roleClass = '';
+    let displayName = userId;
+    let chatColor = '#55aaff';
     if (userData) {
-        const levelBadge = userData.level ? `<span class="user-level-badge level-${userData.level}">Lv.${userData.level}</span>` : '';
-        const roleClass = userData.role === 'admin' ? 'admin-user' : '';
-        const displayName = userData.display_name || userData.username || userId;
-        const chatColor = userData.chat_color || '#55aaff';
-        userDisplay = `${levelBadge}<span class="username ${roleClass}" style="color: ${chatColor}">${displayName}</span>`;
-    } else {
-        userDisplay = `<span class="username">${userId}</span>`;
+        if (userData.level) levelBadge = `<span class="user-level-badge level-${userData.level}">Lv.${userData.level}</span>`;
+        if ((userData.role || '').toLowerCase() === 'admin') roleClass = 'admin-user';
+        displayName = userData.display_name || userData.username || userId;
+        chatColor = userData.chat_color || chatColor;
     }
-    
+    const safeMsg = escapeHtml(message);
     messageDiv.innerHTML = `
-        <span class="timestamp">[${time}]</span>
-        ${userDisplay}:
-        ${escapeHtml(message)}
+        ${levelBadge}<button class="chat-username-btn ${roleClass}" style="color:${chatColor}" data-username="${userId}">${displayName}</button>
+        <span class="chat-sep">:</span>
+        <span class="chat-text">${safeMsg}</span>
     `;
-
+    // Attach click handler for profile
+    const btn = messageDiv.querySelector('.chat-username-btn');
+    if (btn) {
+        btn.addEventListener('click', () => openUserProfile(userId));
+    }
     appendChatMessageElement(messageDiv);
+}
+
+async function openUserProfile(username) {
+    try {
+        const res = await fetch(`/api/profile/${encodeURIComponent(username)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        showUserProfileModal(data);
+    } catch (e) { console.error('Profile load failed', e); }
+}
+
+function showUserProfileModal(data) {
+    let modal = document.getElementById('userProfileModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'userProfileModal';
+        modal.className = 'modal-overlay';
+        modal.innerHTML = `
+            <div class="modal glass-readable profile-modal">
+                <div class="modal-header"><h3 id="profileTitle">User</h3><button class="close-btn" id="closeProfileBtn">×</button></div>
+                <div class="modal-body" id="profileBody"></div>
+            </div>`;
+        document.body.appendChild(modal);
+        modal.addEventListener('click', (e)=>{ if(e.target===modal) closeProfileModal(); });
+        modal.querySelector('#closeProfileBtn').addEventListener('click', closeProfileModal);
+    }
+    const body = modal.querySelector('#profileBody');
+    const title = modal.querySelector('#profileTitle');
+    if (title) title.textContent = data.username + ' Profile';
+    if (body) {
+        body.innerHTML = `
+            <div class="profile-stats">
+                <div><strong>Level:</strong> ${data.level}</div>
+                <div><strong>Pixels:</strong> ${data.pixels}</div>
+                <div><strong>Messages:</strong> ${data.messages}</div>
+                <div><strong>Achievements:</strong> ${data.achievements}</div>
+                <div><strong>Coins:</strong> ${data.coins}</div>
+            </div>`;
+    }
+    modal.style.display = 'flex';
+}
+
+function closeProfileModal(){
+    const modal = document.getElementById('userProfileModal');
+    if (modal) modal.style.display='none';
 }
 
 function addSystemMessage(message) {
@@ -2582,8 +2922,10 @@ async function openLootBox(boxId, btn) {
                 addSystemMessage(`💱 Duplicate ${it.name||it.item_id}: +${it.compensation_coins} coins`);
             }
         });
-        // Rebuild palette (new colors)
-        rebuildOwnedColors();
+        // Refresh palette with any newly unlocked colors (post-auth only)
+        if (typeof loadOwnedColors === 'function') {
+            try { loadOwnedColors(); } catch(_){}
+        }
     } catch(e) {
         if (resultEl) resultEl.innerHTML = `<span style='color:#f87171;'>${escapeHtml(e.message)}</span>`;
     } finally {
@@ -2629,6 +2971,12 @@ async function logout() {
     isAuthenticated = false;
     
     console.log('✅ Logged out successfully');
+
+    // Stop reward scale interval
+    if (rewardScaleIntervalId){
+        clearInterval(rewardScaleIntervalId);
+        rewardScaleIntervalId = null;
+    }
     
     // Close WebSocket
     if (ws) {
@@ -2729,6 +3077,17 @@ async function checkAuthenticationStatus() {
                 
                 updateUserInterface();
                 await connectWebSocket();
+
+                // Start reward scale polling (once) after auth
+                if (!rewardScaleIntervalId){
+                    updateRewardScaleIndicator(); // immediate first fetch
+                    rewardScaleIntervalId = setInterval(updateRewardScaleIndicator, 3500);
+                }
+
+                // Load owned colors now that we're authenticated (if function exists & palette empty)
+                if (typeof loadOwnedColors === 'function'){
+                    try { loadOwnedColors(); } catch(e){ console.warn('Owned colors load failed:', e); }
+                }
                 return;
             }
         }
@@ -2799,13 +3158,33 @@ function switchAdminSection(btn) {
     document.querySelectorAll('.admin-section').forEach(sec => {
         if (sec.id === targetId) sec.classList.add('active'); else sec.classList.remove('active');
     });
-    if (targetId === 'usersTab') {
-        refreshUsers();
-    } else if (targetId === 'statsTab') {
-        loadStats();
-    } else if (targetId === 'achievementsAdminTab') {
-        refreshAchievementDefs();
+    switch(targetId){
+        case 'usersTab':
+            refreshUsers();
+            break;
+        case 'statsTab':
+            loadStats();
+            break;
+        case 'achievementsAdminTab':
+            refreshAchievementDefs();
+            break;
+        case 'lootAdminTab':
+            // Ensure sub-pane lists are loaded
+            adminLoadItems();
+            adminLoadBoxes();
+            break;
     }
+}
+
+function lootSubSwitch(btn){
+    const target = btn.getAttribute('data-target');
+    btn.parentNode.querySelectorAll('.loot-subtab').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    const paneContainer = document.querySelector('.loot-subpanes');
+    if(!paneContainer) return;
+    paneContainer.querySelectorAll('.loot-pane').forEach(p=>p.style.display = (p.id===target)?'block':'none');
+    if(target==='adminItems') adminLoadItems();
+    if(target==='adminBoxes') adminLoadBoxes();
 }
 
 async function refreshAchievementDefs() {
@@ -2907,12 +3286,19 @@ function displayUsers(users) {
         const statusClass = user.is_banned ? 'banned' : user.role.toLowerCase();
         const banInfo = user.is_banned ? 
             `<br><small>Banned: ${user.ban_reason || 'No reason'}</small>` : '';
+     // Defensive defaults to avoid 'undefined' in number inputs
+     const pbSize = Number.isFinite(Number(user.pixel_bag_size)) ? user.pixel_bag_size : 0;
+     const maxPbSize = Number.isFinite(Number(user.max_pixel_bag_size)) ? user.max_pixel_bag_size : pbSize;
+     const xpVal = Number.isFinite(Number(user.experience_points)) ? user.experience_points : 0;
+     const lvlVal = Number.isFinite(Number(user.user_level)) ? user.user_level : 1;
+     const displayName = (user.display_name && user.display_name.trim()) || user.username;
+     const chatColor = /^#([0-9a-f]{6}|[0-9a-f]{3})$/i.test(user.chat_color||'') ? user.chat_color : '#55aaff';
         
         userItem.innerHTML = `
             <div class="user-info-admin">
                 <div class="user-name-admin">
-                    ${user.username} 
-                    <span class="user-level-badge">Level ${user.user_level}</span>
+              ${user.username} 
+              <span class="user-level-badge">Level ${lvlVal}</span>
                 </div>
                 <div class="user-details">
                     Created: ${new Date(user.created_at).toLocaleDateString()}
@@ -2922,31 +3308,31 @@ function displayUsers(users) {
                 <div class="user-stats">
                     <div class="stat-item">
                         <label>Pixels: </label>
-                        <input type="number" class="admin-input" value="${user.pixel_bag_size}" 
-                               onchange="updateUserData('${user.username}', 'pixel_bag_size', this.value)">
+               <input type="number" class="admin-input" value="${pbSize}" 
+                   onchange="updateUserData('${user.username}', 'pixel_bag_size', this.value)">
                         /
-                        <input type="number" class="admin-input" value="${user.max_pixel_bag_size}" 
-                               onchange="updateUserData('${user.username}', 'max_pixel_bag_size', this.value)">
+               <input type="number" class="admin-input" value="${maxPbSize}" 
+                   onchange="updateUserData('${user.username}', 'max_pixel_bag_size', this.value)">
                     </div>
                     <div class="stat-item">
                         <label>XP: </label>
-                        <input type="number" class="admin-input" value="${user.experience_points}" 
-                               onchange="updateUserData('${user.username}', 'experience_points', this.value)">
+               <input type="number" class="admin-input" value="${xpVal}" 
+                   onchange="updateUserData('${user.username}', 'experience_points', this.value)">
                     </div>
                     <div class="stat-item">
                         <label>Level: </label>
-                        <input type="number" class="admin-input" value="${user.user_level}" 
-                               onchange="updateUserData('${user.username}', 'user_level', this.value)">
+               <input type="number" class="admin-input" value="${lvlVal}" 
+                   onchange="updateUserData('${user.username}', 'user_level', this.value)">
                     </div>
                     <div class="stat-item">
                         <label>Display Name: </label>
-                        <input type="text" class="admin-input" value="${user.display_name || user.username}" 
-                               onchange="updateUserData('${user.username}', 'display_name', this.value)" maxlength="30">
+               <input type="text" class="admin-input" value="${displayName}" 
+                   onchange="updateUserData('${user.username}', 'display_name', this.value)" maxlength="30">
                     </div>
                     <div class="stat-item">
                         <label>Chat Color: </label>
-                        <input type="color" class="admin-input" value="${user.chat_color || '#55aaff'}" 
-                               onchange="updateUserData('${user.username}', 'chat_color', this.value)">
+               <input type="color" class="admin-input" value="${chatColor}" 
+                   onchange="updateUserData('${user.username}', 'chat_color', this.value)">
                     </div>
                     <div class="stat-item">
                         <label>Total Pixels: </label>
@@ -2958,8 +3344,9 @@ function displayUsers(users) {
             <div class="user-actions-admin">
                 ${user.is_banned ? 
                     `<button class="btn btn-success" onclick="unbanUser('${user.username}')">Unban</button>` :
-                    user.username !== currentUser.username ? 
+              (typeof currentUser !== 'undefined' && user.username !== currentUser.username ? 
                         `<button class="btn btn-danger" onclick="showBanModal('${user.username}')">Ban</button>` : ''
+              )
                 }
             </div>
         `;
@@ -3495,4 +3882,5 @@ window.addEventListener('load', () => {
 });
 
 // Initialize the application when DOM is ready
+// (Ensure all previous blocks closed correctly)
 init();

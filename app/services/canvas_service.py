@@ -60,12 +60,12 @@ class CanvasService:
     def get_local_coords(self, x: int, y: int) -> Tuple[int, int]:
         return (x % settings.REGION_SIZE, y % settings.REGION_SIZE)
 
-    async def place_pixel(self, x: int, y: int, color: str, user_id: str) -> bool:
+    async def place_pixel(self, x: int, y: int, color: str, user_id: str, effect: str | None = None) -> bool:
         if not self.is_valid_position(x, y):
             return False
         region_coords = self.get_region_coords(x, y)
         local_coords = self.get_local_coords(x, y)
-        pixel = Pixel(x, y, color, time.time(), user_id)
+        pixel = Pixel(x, y, color, time.time(), user_id, effect)
         self.regions.setdefault(region_coords, {})[local_coords] = pixel
         if self._initialized:
             await self.persistence.save_pixel(pixel)
@@ -85,6 +85,7 @@ class CanvasService:
                 "color": pixel.color,
                 "timestamp": pixel.timestamp,
                 "user_id": pixel.user_id,
+                "effect": pixel.effect,
             }
         return region_data
 

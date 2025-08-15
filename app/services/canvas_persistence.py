@@ -124,6 +124,7 @@ class CanvasPersistence:
             'color': pixel.color,
             'timestamp': pixel.timestamp,
             'user_id': pixel.user_id,
+            'effect': pixel.effect,
             'region_x': pixel.x // settings.REGION_SIZE,
             'region_y': pixel.y // settings.REGION_SIZE
         })
@@ -131,46 +132,6 @@ class CanvasPersistence:
         # If batch is full, save immediately
         if len(self.pending_pixels) >= self.batch_size:
             await self._flush_pending_pixels()
-            
-    async def save_canvas_snapshot(self, regions: Dict[Tuple[int, int], Dict[Tuple[int, int], Pixel]]):
-        """Save a complete canvas snapshot"""
-        try:
-            all_pixels = []
-            
-            for region_coords, region_pixels in regions.items():
-                for local_coords, pixel in region_pixels.items():
-                    all_pixels.append({
-                        'x': pixel.x,
-                        'y': pixel.y,
-                        'color': pixel.color,
-                        'timestamp': pixel.timestamp,
-                        'user_id': pixel.user_id,
-                        'region_x': region_coords[0],
-                        'region_y': region_coords[1]
-                    })
-            
-            if all_pixels:
-                df = pd.DataFrame(all_pixels)
-                
-                # Optimize data types for smaller file size
-                df['x'] = df['x'].astype('uint16')
-                df['y'] = df['y'].astype('uint16')
-                df['region_x'] = df['region_x'].astype('uint8')
-                df['region_y'] = df['region_y'].astype('uint8')
-                df['timestamp'] = df['timestamp'].astype('float64')
-                
-                # Save with compression
-                df.to_parquet(
-                    self.pixels_file,
-                    compression='snappy',
-                    index=False,
-                    engine='pyarrow'
-                )
-                
-                print(f"Canvas snapshot saved: {len(all_pixels)} pixels")
-                
-        except Exception as e:
-            print(f"Error saving canvas snapshot: {e}")
             
     async def _flush_pending_pixels(self):
         """Flush pending pixels to disk"""
@@ -186,6 +147,8 @@ class CanvasPersistence:
             df['region_x'] = df['region_x'].astype('uint8')
             df['region_y'] = df['region_y'].astype('uint8')
             df['timestamp'] = df['timestamp'].astype('float64')
+            if 'effect' not in df.columns:
+                df['effect'] = None
             
             # Append to main file if exists, otherwise create new
             if self.pixels_file.exists():
@@ -193,6 +156,8 @@ class CanvasPersistence:
                 existing_df = pd.read_parquet(self.pixels_file)
                 # Combine and remove duplicates (keep latest by timestamp)
                 combined_df = pd.concat([existing_df, df], ignore_index=True)
+                if 'effect' not in combined_df.columns:
+                    combined_df['effect'] = None
                 combined_df = combined_df.sort_values('timestamp').drop_duplicates(
                     subset=['x', 'y'], keep='last'
                 )
@@ -257,6 +222,55 @@ class CanvasPersistence:
             }
         }
         return stats
+
+    async def save_canvas_snapshot(self, regions: Dict[Tuple[int, int], Dict[Tuple[int, int], Pixel]]):
+        """Persist a full snapshot of the current in-memory canvas.
+
+        This writes a complete, deduplicated set of pixels to the main parquet file.
+        Pending batch pixels are flushed first so no data is lost. Region parquet
+        files are not individually rewritten here (they are append-only via batch flushes).
+        """
+        try:
+            # Flush any pending incremental pixels first
+            await self._flush_pending_pixels()
+            rows = []
+            for (region_x, region_y), region_pixels in regions.items():
+                if not region_pixels:
+                    continue
+                for (lx, ly), pixel in region_pixels.items():
+                    rows.append({
+                        'x': pixel.x,
+                        'y': pixel.y,
+                        'color': pixel.color,
+                        'timestamp': pixel.timestamp,
+                        'user_id': pixel.user_id,
+                        'effect': getattr(pixel, 'effect', None),
+                        'region_x': region_x,
+                        'region_y': region_y
+                    })
+            if not rows:
+                # Still create an empty file to signal snapshot state
+                empty_df = pd.DataFrame(columns=['x','y','color','timestamp','user_id','effect','region_x','region_y'])
+                empty_df.to_parquet(self.pixels_file, compression='snappy', index=False, engine='pyarrow')
+                self.last_save_time = time.time()
+                return 0
+            df = pd.DataFrame(rows)
+            # Optimize dtypes
+            df['x'] = df['x'].astype('uint16')
+            df['y'] = df['y'].astype('uint16')
+            df['region_x'] = df['region_x'].astype('uint8')
+            df['region_y'] = df['region_y'].astype('uint8')
+            df['timestamp'] = df['timestamp'].astype('float64')
+            if 'effect' not in df.columns:
+                df['effect'] = None
+            # Deduplicate by coordinate keeping latest timestamp
+            df = df.sort_values('timestamp').drop_duplicates(subset=['x','y'], keep='last')
+            df.to_parquet(self.pixels_file, compression='snappy', index=False, engine='pyarrow')
+            self.last_save_time = time.time()
+            return len(df)
+        except Exception as e:
+            print(f"Error saving canvas snapshot: {e}")
+            return -1
 
     async def enforce_retention(self):
         """Placeholder retention: currently single snapshot file so nothing to prune."""

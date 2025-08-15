@@ -1,55 +1,77 @@
-import json, os, random, time
+import random
 from typing import Dict, List, Optional
 from dataclasses import asdict
+from datetime import datetime
 from app.models.items import ItemDef, LootBoxDef, LootBoxDrop, ItemType, Rarity
 from app.models.enums import MessageType
 from app.services.auth_service import auth_service
-from datetime import datetime
+from app.db.database import get_session
+from app.db.repositories.item_repository import item_repository, loot_box_repository
+import asyncio
 
-DATA_DIR = "data"
-ITEMS_FILE = os.path.join(DATA_DIR, "items.json")
-BOXES_FILE = os.path.join(DATA_DIR, "loot_boxes.json")
 
 class LootBoxService:
+    """Loot box and item service backed by database.
+
+    Bootstraps defaults if tables empty (idempotent). Former JSON file persistence removed.
+    """
     def __init__(self):
         self.items: Dict[str, ItemDef] = {}
         self.boxes: Dict[str, LootBoxDef] = {}
-        os.makedirs(DATA_DIR, exist_ok=True)
-        self._load_all()
-        if not self.items:
-            self._seed_defaults()
-            self._save_all()
-
-    # ================== Persistence ==================
-    def _load_all(self):
+        # Async bootstrap
+        async def _bootstrap():
+            try:
+                async for session in get_session():
+                    # Load existing
+                    db_items = await item_repository.list_items(session)
+                    for raw in db_items:
+                        self.items[raw['id']] = ItemDef(
+                            id=raw['id'], type=ItemType(raw['type']), name=raw['name'], rarity=Rarity(raw['rarity']),
+                            payload=raw['payload'], tags=raw['tags']
+                        )
+                    db_boxes = await loot_box_repository.list_boxes(session)
+                    for raw in db_boxes:
+                        self.boxes[raw['id']] = LootBoxDef(
+                            id=raw['id'], name=raw['name'], price_coins=raw['price_coins'],
+                            drops=[LootBoxDrop(**d) for d in raw.get('drops', [])],
+                            guaranteed=raw.get('guaranteed', []), rarity_bonus=raw.get('rarity_bonus', {}),
+                            max_rolls=raw.get('max_rolls', 1)
+                        )
+                    if not self.items:
+                        self._seed_defaults()
+                        # Persist defaults
+                        for item in self.items.values():
+                            await item_repository.upsert_item(session, {
+                                'id': item.id,
+                                'type': item.type.value,
+                                'name': item.name,
+                                'rarity': item.rarity.value,
+                                'payload': item.payload,
+                                'tags': item.tags
+                            })
+                        for box in self.boxes.values():
+                            await loot_box_repository.upsert_box(session, {
+                                'id': box.id,
+                                'name': box.name,
+                                'price_coins': box.price_coins,
+                                'drops': [asdict(d) for d in box.drops],
+                                'guaranteed': box.guaranteed,
+                                'rarity_bonus': box.rarity_bonus,
+                                'max_rolls': box.max_rolls
+                            })
+                        await session.commit()
+            except Exception as e:
+                print(f"⚠️ Loot bootstrap failed: {e}")
         try:
-            if os.path.exists(ITEMS_FILE):
-                with open(ITEMS_FILE, 'r') as f:
-                    data = json.load(f)
-                    for raw in data:
-                        self.items[raw['id']] = ItemDef(**raw)
-            if os.path.exists(BOXES_FILE):
-                with open(BOXES_FILE, 'r') as f:
-                    data = json.load(f)
-                    for raw in data:
-                        raw['drops'] = [LootBoxDrop(**d) for d in raw.get('drops', [])]
-                        self.boxes[raw['id']] = LootBoxDef(**raw)
-        except Exception as e:
-            print(f"⚠️ Failed loading loot data: {e}")
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_bootstrap())
+            else:
+                loop.run_until_complete(_bootstrap())
+        except RuntimeError:
+            asyncio.run(_bootstrap())
 
-    def _save_all(self):
-        try:
-            with open(ITEMS_FILE, 'w') as f:
-                json.dump([asdict(i) for i in self.items.values()], f, indent=2)
-            with open(BOXES_FILE, 'w') as f:
-                boxes_serial = []
-                for b in self.boxes.values():
-                    bd = asdict(b)
-                    bd['drops'] = [asdict(d) for d in b.drops]
-                    boxes_serial.append(bd)
-                json.dump(boxes_serial, f, indent=2)
-        except Exception as e:
-            print(f"⚠️ Failed saving loot data: {e}")
+    # (Removed file persistence methods)
 
     # ================== Defaults ==================
     def _seed_defaults(self):
@@ -116,24 +138,48 @@ class LootBoxService:
                 guaranteed.append(granted)
         rolls = box.max_rolls
         pool = box.drops
+        # Precompute adjusted weights using tier weights + box rarity_bonus
+        try:
+            from app.services.tier_service import get_tiers
+            import asyncio as _asyncio
+            # Synchronously fetch cached tiers (get_tiers will hit cache unless empty)
+            if _asyncio.get_event_loop().is_running():
+                tiers = _asyncio.get_event_loop().run_until_complete(get_tiers())  # fallback if running
+            else:
+                tiers = _asyncio.run(get_tiers())
+            tier_weight_map = {t['key']: t['weight'] for t in tiers}
+        except Exception:
+            tier_weight_map = {}
+        rarity_bonus = box.rarity_bonus or {}
+        adjusted = []
+        for d in pool:
+            it = self.items.get(d.item_id)
+            base_w = d.weight
+            if it:
+                rar = getattr(it, 'rarity', None)
+                key = rar.value if isinstance(rar, Rarity) else rar
+                tier_w = tier_weight_map.get(key, 1)
+                bonus = rarity_bonus.get(key, 0)
+                base_w = max(1, int(base_w * tier_w + bonus))
+            adjusted.append((d, base_w))
         for _ in range(rolls):
-            total_weight = sum(d.weight for d in pool)
+            total_weight = sum(w for _, w in adjusted)
             r = random.uniform(0, total_weight)
             upto = 0
             chosen: Optional[LootBoxDrop] = None
-            for d in pool:
-                if upto + d.weight >= r:
+            for d, w in adjusted:
+                if upto + w >= r:
                     chosen = d
                     break
-                upto += d.weight
+                upto += w
             if not chosen:
-                chosen = pool[-1]
+                chosen = adjusted[-1][0]
             granted = self._grant_item(user, chosen.item_id)
             if granted:
                 awarded_items.append(granted)
         # Persist
         auth_service._save_user(username)
-        # Identify raros para broadcast (epic+)
+        # Identify rare unlocks (epic+)
         rare_unlocks = [i for i in awarded_items + guaranteed if i['rarity'] in (Rarity.EPIC, Rarity.LEGENDARY)]
         result = {
             "success": True,
@@ -147,22 +193,13 @@ class LootBoxService:
         if rare_unlocks:
             try:
                 from app.main import region_manager
-                # Compose message per rare
                 for item in rare_unlocks:
-                    # Broadcast to all regions user currently in
                     user_regions = region_manager.user_regions.get(username, set()) or []
-                    payload = {
-                        "type": MessageType.NEW_ITEM_UNLOCKED.value,
-                        "user_id": username,
-                        "item": item
-                    }
-                    # If no regions tracked yet, skip
                     if not user_regions:
                         continue
+                    payload = {"type": MessageType.NEW_ITEM_UNLOCKED.value, "user_id": username, "item": item}
+                    import asyncio
                     for (rx, ry) in user_regions:
-                        # Exclude user to let their own UI handle via REST response? We'll still include them.
-                        # Simplicity: send to everyone.
-                        import asyncio
                         asyncio.create_task(region_manager.broadcast_to_region(rx, ry, payload))
             except Exception as e:
                 print(f"⚠️ Rare unlock broadcast failed: {e}")

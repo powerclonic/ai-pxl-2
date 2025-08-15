@@ -22,14 +22,14 @@ class RegionManager:
         self.user_service = UserService()
         self.region_connections: Dict[Tuple[int, int], Set[str]] = {}
         self.user_regions: Dict[str, Set[Tuple[int, int]]] = {}  # Track which regions each user is in
-        self.chat_history: Dict[Tuple[int, int], List[ChatMessage]] = {}
+        # Global chat (single history) replacing per-region chat_history
+        self.chat_history: List[ChatMessage] = []
         self._initialized = False
-        
-        # Initialize region connections and chat history
+
+        # Initialize region connections
         for region_x in range(settings.REGIONS_PER_SIDE):
             for region_y in range(settings.REGIONS_PER_SIDE):
                 self.region_connections[(region_x, region_y)] = set()
-                self.chat_history[(region_x, region_y)] = []
                 
     async def initialize(self):
         """Initialize the region manager and canvas service"""
@@ -200,8 +200,23 @@ class RegionManager:
         # a window where a failed placement still lets user keep pixel but others saw canvas change.)
         authenticated_user.pixel_bag_size -= 1
         consume_time = datetime.now()
+        inferred_effect = None
         try:
-            placed = await self.canvas_service.place_pixel(x, y, color, user_id)
+            # Infer effect BEFORE persisting so it is saved
+            from app.services.loot_box_service import loot_box_service
+            user = self.user_service.get_user(user_id)
+            if user:
+                for cid in getattr(user, 'owned_colors', []) or []:
+                    item = loot_box_service.get_item(cid)
+                    if item and item.payload and item.payload.get('color') and item.payload.get('effect'):
+                        if item.payload.get('color').lower() == color.lower():
+                            inferred_effect = item.payload.get('effect')
+                            break
+        except Exception as e:
+            print(f"⚠️ Effect inference pre-place failed: {e}")
+
+        try:
+            placed = await self.canvas_service.place_pixel(x, y, color, user_id, inferred_effect)
         except Exception as e:
             placed = False
             print(f"❌ Error placing pixel for {user_id} at ({x},{y}): {e}")
@@ -257,22 +272,7 @@ class RegionManager:
         # Broadcast pixel update to all users in ALL regions where the placer is connected
         # This ensures users in adjacent regions also see the pixel update
         pixel_region_coords = self.canvas_service.get_region_coords(x, y)
-        # Try to infer effect server-side (color item payload may define 'effect')
-        inferred_effect = None
-        try:
-            from app.services.loot_box_service import loot_box_service
-            # Build a mapping color->effect for user's owned color items
-            user_effect_colors = []
-            user = self.user_service.get_user(user_id)
-            if user:
-                for cid in getattr(user, 'owned_colors', []) or []:
-                    item = loot_box_service.get_item(cid)
-                    if item and item.payload and item.payload.get('color') and item.payload.get('effect'):
-                        if item.payload.get('color').lower() == color.lower():
-                            inferred_effect = item.payload.get('effect')
-                            break
-        except Exception as e:
-            print(f"⚠️ Failed inferring effect for color {color}: {e}")
+    # inferred_effect already determined above (used for persistence)
 
         pixel_update_message = {
             "type": MessageType.PIXEL_UPDATE.value,
@@ -311,28 +311,20 @@ class RegionManager:
         return True
     
     async def send_chat_message(self, user_id: str, message: str):
-        """Send chat message to users in the same region"""
+        """Global chat: broadcast message to all users, keep single shared history."""
         user = self.user_service.get_user(user_id)
         if not user:
             return
-        
-        region_coords = (user.current_region_x, user.current_region_y)
-        
         chat_msg = ChatMessage(
             user_id=user_id,
             message=message,
             timestamp=time.time(),
-            region_x=region_coords[0],
-            region_y=region_coords[1]
+            region_x=-1,
+            region_y=-1
         )
-        
-        # Store in chat history (keep last N messages per region)
-        region_chat = self.chat_history[region_coords]
-        region_chat.append(chat_msg)
-        if len(region_chat) > settings.MAX_CHAT_HISTORY_PER_REGION:
-            region_chat.pop(0)
-        
-        # Reward message (simple baseline: 1 coin + 1 xp)
+        self.chat_history.append(chat_msg)
+        if len(self.chat_history) > settings.MAX_CHAT_HISTORY_PER_REGION:
+            self.chat_history.pop(0)
         authenticated_user = auth_service.get_user_by_username(user_id)
         if authenticated_user:
             try:
@@ -341,18 +333,15 @@ class RegionManager:
                 xp_service.add_xp(user_id, 1)
             except Exception as e:
                 print(f"⚠️ Chat reward grant failed: {e}")
-        # Get user data for enhanced chat display (after reward)
         user_data = {
             "username": user_id,
             "level": authenticated_user.user_level if authenticated_user else 1,
             "role": authenticated_user.role.value if authenticated_user else "USER",
-            "display_name": authenticated_user.display_name if authenticated_user else None,
-            "chat_color": authenticated_user.chat_color if authenticated_user else "#55aaff",
+            "display_name": getattr(authenticated_user, 'display_name', None) if authenticated_user else None,
+            "chat_color": getattr(authenticated_user, 'chat_color', '#55aaff') if authenticated_user else "#55aaff",
             "coins": getattr(authenticated_user, 'coins', 0) if authenticated_user else 0
         }
-        
-        # Broadcast to region
-        await self.broadcast_to_region(region_coords[0], region_coords[1], {
+        await self.broadcast_global({
             "type": MessageType.CHAT_BROADCAST.value,
             "user_id": user_id,
             "user_data": user_data,
@@ -361,12 +350,9 @@ class RegionManager:
         })
     
     async def send_region_data(self, user_id: str, region_x: int, region_y: int):
-        """Send complete region data to a user"""
+        """Send complete region data to a user (includes global chat history)."""
         region_data = self.canvas_service.get_region_data(region_x, region_y)
-        chat_history = [
-            asdict(msg) for msg in 
-            self.chat_history[(region_x, region_y)][-settings.CHAT_HISTORY_RESPONSE_LIMIT:]
-        ]
+        chat_history = [asdict(msg) for msg in self.chat_history[-settings.CHAT_HISTORY_RESPONSE_LIMIT:]]
         
         await self.send_to_user(user_id, {
             "type": MessageType.REGION_DATA.value,
@@ -386,6 +372,18 @@ class RegionManager:
         for user_id in self.region_connections[region_coords].copy():
             if user_id != exclude_user:
                 await self.send_to_user(user_id, message)
+    
+    async def broadcast_global(self, message: dict, exclude_user: str = None):
+        """Broadcast to every connected user (global chat)."""
+        for uid in list(self.user_service.users.keys()):
+            if exclude_user and uid == exclude_user:
+                continue
+            user = self.user_service.get_user(uid)
+            if user and user.websocket:
+                try:
+                    await user.websocket.send_json(message)
+                except Exception:
+                    pass
     
     async def send_to_user(self, user_id: str, message: dict):
         """Send message to a specific user"""

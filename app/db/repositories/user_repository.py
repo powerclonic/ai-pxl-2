@@ -27,6 +27,9 @@ def _to_dataclass(row: UserORM) -> AuthenticatedUser:
         experience_points=row.experience_points,
         user_level=row.user_level,
         achievements=row.achievements or [],
+    coins=getattr(row, 'coins', 0),
+    owned_colors=getattr(row, 'owned_colors', []) or [],
+    owned_effects=getattr(row, 'owned_effects', []) or [],
         last_pixel_placed_at=None,
         last_message_sent_at=None,
         display_name=None,
@@ -53,6 +56,9 @@ class UserRepository:
             experience_points=user.experience_points,
             user_level=user.user_level,
             achievements=user.achievements,
+            coins=user.coins,
+            owned_colors=user.owned_colors,
+            owned_effects=user.owned_effects,
         ).on_conflict_do_update(
             index_elements=[UserORM.id],
             set_={  # NOTE: dialect expects set_ (underscore) for SQLite
@@ -69,6 +75,9 @@ class UserRepository:
                 'experience_points': user.experience_points,
                 'user_level': user.user_level,
                 'achievements': user.achievements,
+                'coins': user.coins,
+                'owned_colors': user.owned_colors,
+                'owned_effects': user.owned_effects,
             }
         )
         await session.execute(stmt)

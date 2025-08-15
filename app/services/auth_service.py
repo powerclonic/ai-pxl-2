@@ -17,7 +17,7 @@ from app.db.database import redis_client
 
 from app.core.config import Settings
 from app.models.models import User, AuthenticatedUser, UserRole, CaptchaChallenge
-from app.services.persistence_service import persistence_service
+from app.db.repositories.session_repository import session_repository
 
 
 class AuthService:
@@ -46,21 +46,18 @@ class AuthService:
                     if db_users:
                         self.users = {u.username: u for u in db_users}
                     else:
-                        # Fallback seed from JSON persistence
-                        self.users = persistence_service.load_users()
-                        loaded_from = "json"
-                        # Seed DB
-                        for u in self.users.values():
-                            await user_repository.upsert_user(session, u)
-                        await session.commit()
+                        # No existing users -> create default admin lazily later
+                        pass
             except Exception as e:
-                print(f"⚠️ User bootstrap failed: {e}; using JSON only")
-                if not self.users:
-                    self.users = persistence_service.load_users()
-                    loaded_from = "json-error"
-            # Load sessions (still file-based)
-            self.session_tokens, self.session_locks = persistence_service.load_sessions()
-            print(f"✅ Loaded {len(self.users)} users from {loaded_from} | sessions={len(self.session_tokens)}")
+                print(f"⚠️ User bootstrap failed: {e}; continuing with empty user set")
+            # Load sessions from DB
+            try:
+                async for session in get_session():
+                    self.session_tokens = await session_repository.load_all(session)
+                    print(f"✅ Loaded {len(self.users)} users from {loaded_from} | sessions={len(self.session_tokens)} (db)")
+                    break
+            except Exception as e:
+                print(f"⚠️ Failed loading sessions from DB: {e}")
             # Ensure default admin exists (and persisted)
             self._create_default_admin()
             async for session in get_session():
@@ -120,6 +117,22 @@ class AuthService:
         }
         token = jwt.encode(payload, self.settings.SECRET_KEY, algorithm=self.settings.ALGORITHM)
         self.session_tokens[token] = user_id
+        # Persist session asynchronously
+        async def _persist_session():
+            try:
+                async for session in get_session():
+                    await session_repository.upsert(session, token, user_id)
+                    await session.commit()
+            except Exception as e:
+                print(f"⚠️ Persist session failed: {e}")
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_persist_session())
+            else:
+                loop.run_until_complete(_persist_session())
+        except RuntimeError:
+            asyncio.run(_persist_session())
         return token
     
     def _validate_token(self, token: str) -> Optional[str]:
@@ -161,7 +174,6 @@ class AuthService:
             ban_reason=None,
             failed_login_attempts=0
         )
-        
         self.users[username] = user
         self._save_users()
         return True, "User registered successfully"
@@ -409,17 +421,28 @@ class AuthService:
     
     def invalidate_session(self, token: str) -> bool:
         """Invalidate a session token"""
-        if token in self.session_tokens:
-            user_id = self.session_tokens[token]
-            del self.session_tokens[token]
-            
-            # Clean up lock if exists
-            if user_id in self.session_locks:
-                del self.session_locks[user_id]
-            
-            self._save_sessions()  # Save sessions to persistence
-            return True
-        return False
+        if token not in self.session_tokens:
+            return False
+        user_id = self.session_tokens[token]
+        del self.session_tokens[token]
+        if user_id in self.session_locks:
+            del self.session_locks[user_id]
+        async def _delete():
+            try:
+                async for session in get_session():
+                    await session_repository.delete(session, token)
+                    await session.commit()
+            except Exception as e:
+                print(f"⚠️ Session delete failed: {e}")
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_delete())
+            else:
+                loop.run_until_complete(_delete())
+        except RuntimeError:
+            asyncio.run(_delete())
+        return True
     
     def _cleanup_user_sessions(self, user_id: str, exclude_token: str = None):
         """Clean up old sessions for a user (keep only the latest)"""
@@ -432,10 +455,25 @@ class AuthService:
             del self.session_tokens[token]
         
         if tokens_to_remove:
-            self._save_sessions()  # Save sessions to persistence if any were removed
+            async def _delete_batch(rem_tokens):
+                try:
+                    async for session in get_session():
+                        for t in rem_tokens:
+                            await session_repository.delete(session, t)
+                        await session.commit()
+                except Exception as e:
+                    print(f"⚠️ Batch session delete failed: {e}")
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(_delete_batch(tokens_to_remove))
+                else:
+                    loop.run_until_complete(_delete_batch(tokens_to_remove))
+            except RuntimeError:
+                asyncio.run(_delete_batch(tokens_to_remove))
     
     def _save_users(self):
-        """Persist all users to DB (batch) and JSON (legacy backup)."""
+        """Persist all users to DB (batch)."""
         async def _save():
             try:
                 async for session in get_session():
@@ -444,11 +482,6 @@ class AuthService:
                     await session.commit()
             except Exception as e:
                 print(f"⚠️ DB save users failed: {e}")
-            # Legacy backup JSON (best-effort)
-            try:
-                persistence_service.save_users(self.users)
-            except Exception as e:
-                print(f"⚠️ JSON backup save failed: {e}")
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -470,10 +503,6 @@ class AuthService:
                     await session.commit()
             except Exception as e:
                 print(f"⚠️ DB save user {username} failed: {e}")
-            try:
-                persistence_service.save_users(self.users)
-            except Exception:
-                pass
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -535,11 +564,6 @@ class AuthService:
                 await session.commit()
         except Exception as e:
             print(f"⚠️ Dirty user batch flush failed: {e}")
-        # JSON backup best-effort
-        try:
-            persistence_service.save_users(self.users)
-        except Exception:
-            pass
         self._dirty_last_flush = time.time()
 
     def flush_dirty_now(self):
@@ -587,9 +611,8 @@ class AuthService:
             "window_seconds_remaining": remaining
         }
     
-    def _save_sessions(self):
-        """Save sessions to persistence"""
-        persistence_service.save_sessions(self.session_tokens, self.session_locks)
+    def _save_sessions(self):  # Deprecated (no-op except cleaning locks)
+        pass
     
     def update_user_stats(self, user_id: str, pixels_placed: int = 0, messages_sent: int = 0):
         """Update user statistics"""

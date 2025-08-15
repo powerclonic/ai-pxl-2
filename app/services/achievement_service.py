@@ -7,18 +7,14 @@ by callers.
 """
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass, asdict
-from pathlib import Path
 from typing import Any, Dict, List
 
 from app.services.auth_service import auth_service
 import asyncio
 from app.db.database import get_session
 from app.db.repositories.achievement_repository import achievement_repository
-
-ACHIEVEMENTS_FILE = Path("data/achievements.json")
 
 
 @dataclass
@@ -38,9 +34,8 @@ class AchievementService:
         self.load_definitions()
 
     def load_definitions(self) -> None:
-        """Load achievements from JSON file (idempotent)."""
+        """Load achievements from DB only (legacy JSON removed)."""
         async def _load():
-            # Try DB first
             try:
                 async for session in get_session():
                     db_defs = await achievement_repository.list_definitions(session)
@@ -51,23 +46,6 @@ class AchievementService:
                         return
             except Exception as e:
                 print(f"⚠️ Failed reading achievements from DB: {e}")
-            # Fallback JSON seed
-            try:
-                with ACHIEVEMENTS_FILE.open("r", encoding="utf-8") as f:
-                    raw = json.load(f)
-                self.achievements = [AchievementDef(**a) for a in raw]
-                self.last_loaded_ts = time.time()
-                print(f"Achievements: loaded {len(self.achievements)} definitions (file seed)")
-                # Seed DB asynchronously
-                async for session in get_session():
-                    for a in raw:
-                        await achievement_repository.upsert_definition(session, a)
-                    await session.commit()
-            except FileNotFoundError:
-                print("⚠️ Achievements file not found; no achievements loaded")
-                self.achievements = []
-            except Exception as e:
-                print(f"❌ Failed to load achievements: {e}")
                 self.achievements = []
         # Schedule load (can be awaited if event loop running)
         try:
@@ -84,14 +62,8 @@ class AchievementService:
 
     # --------- Mutation (admin) ---------
     def _persist(self):
-        try:
-            ACHIEVEMENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with ACHIEVEMENTS_FILE.open('w', encoding='utf-8') as f:
-                json.dump([asdict(a) for a in self.achievements], f, indent=2, ensure_ascii=False)
-            return True
-        except Exception as e:
-            print(f"❌ Failed saving achievements: {e}")
-            return False
+        # No file persistence; definitions live in memory + DB
+        return True
 
     def upsert(self, data: Dict[str, Any]) -> AchievementDef | None:
         required = {"id", "icon", "name", "desc", "condition"}
@@ -112,8 +84,7 @@ class AchievementService:
             self.achievements.append(AchievementDef(
                 id=data['id'], icon=data['icon'], name=data['name'], desc=data['desc'], condition=cond, tier=data.get('tier')
             ))
-        self._persist()
-        # Also upsert in DB
+    # Upsert directly in DB
         async def _db():
             try:
                 async for session in get_session():
@@ -136,7 +107,6 @@ class AchievementService:
         self.achievements = [a for a in self.achievements if a.id != achievement_id]
         changed = len(self.achievements) != before
         if changed:
-            self._persist()
             async def _del():
                 try:
                     async for session in get_session():
@@ -161,7 +131,6 @@ class AchievementService:
         for d in defs:
             if self.upsert(d):
                 added += 1
-        self._persist()
         return {"count": added, "total": len(self.achievements)}
 
     # -------- Evaluation --------

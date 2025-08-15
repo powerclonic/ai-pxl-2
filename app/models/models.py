@@ -78,12 +78,17 @@ class CaptchaChallenge:
 
 @dataclass
 class Pixel:
-    """Represents a pixel on the canvas"""
+    """Represents a pixel on the canvas.
+
+    Added optional 'effect' field so special visual effects (glow / spark) persist
+    across reloads instead of only being visible for newly placed pixels.
+    """
     x: int
     y: int
     color: str
     timestamp: float
     user_id: str
+    effect: str | None = None
 
 @dataclass
 class ChatMessage:

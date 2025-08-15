@@ -10,64 +10,83 @@
 </head>
 
 <body>
-    <!-- Authentication Modal -->
+    <!-- Authentication Modal (Restyled) -->
     <div class="auth-modal" id="authModal">
-        <div class="auth-modal-content">
-            <div class="auth-header">
-                <h2>Pixel Canvas - Login Required</h2>
-                <p>Please sign in to start placing pixels</p>
+        <div class="auth-shell">
+            <div class="auth-left">
+                <div class="brand-badge">
+                    <span class="material-symbols-rounded logo-ico">palette</span>
+                </div>
+                <h1 class="auth-title">
+                    <span class="grad-text">PixelPlace</span>
+                    <small>Colabore, conquiste, evolua.</small>
+                </h1>
+                <ul class="auth-features">
+                    <li><span class="material-symbols-rounded">draw</span> Canvas colaborativo infinito</li>
+                    <li><span class="material-symbols-rounded">auto_awesome</span> Cores raras & efeitos especiais</li>
+                    <li><span class="material-symbols-rounded">inventory_2</span> Loot boxes & economia</li>
+                    <li><span class="material-symbols-rounded">emoji_events</span> Achievements & níveis</li>
+                    <li><span class="material-symbols-rounded">chat</span> Chat em tempo real</li>
+                </ul>
+                <div class="auth-mini-tip">Sem fundo pesado • Interface glass • Rápido e leve</div>
             </div>
-            
-            <div class="auth-tabs">
-                <button class="auth-tab active" onclick="showLoginForm()">Login</button>
-                <button class="auth-tab" onclick="showRegisterForm()">Register</button>
-            </div>
-            
-            <!-- Login Form -->
-            <div class="auth-form" id="loginForm">
-                <form id="loginFormElement">
-                    <div class="form-group">
-                        <label for="loginUsername">Username:</label>
-                        <input type="text" id="loginUsername" name="username" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="loginPassword">Password:</label>
-                        <input type="password" id="loginPassword" name="password" required>
-                    </div>
-                    <div class="form-group captcha-group" id="loginCaptchaGroup" style="display: none;">
-                        <label for="loginCaptcha">Security Check:</label>
-                        <div class="captcha-question" id="loginCaptchaQuestion"></div>
-                        <input type="text" id="loginCaptcha" name="captcha_answer" placeholder="Enter answer">
-                    </div>
-                    <button type="submit" class="auth-submit">Login</button>
-                </form>
-            </div>
-            
-            <!-- Register Form -->
-            <div class="auth-form" id="registerForm" style="display: none;">
-                <form id="registerFormElement">
-                    <div class="form-group">
-                        <label for="registerUsername">Username:</label>
-                        <input type="text" id="registerUsername" name="username" required>
-                        <small>3-20 characters</small>
-                    </div>
-                    <div class="form-group">
-                        <label for="registerPassword">Password:</label>
-                        <input type="password" id="registerPassword" name="password" required>
-                        <small>Minimum 6 characters</small>
-                    </div>
-                    <div class="form-group">
-                        <label for="registerConfirmPassword">Confirm Password:</label>
-                        <input type="password" id="registerConfirmPassword" name="confirmPassword" required>
-                    </div>
-                    <button type="submit" class="auth-submit">Register</button>
-                </form>
-            </div>
-            
-            <div class="auth-error" id="authError"></div>
-            <div class="auth-loading" id="authLoading" style="display: none;">
-                <div class="loading-spinner"></div>
-                <span>Connecting...</span>
+            <div class="auth-card">
+                <div class="auth-header">
+                    <h2 class="switchable" id="authCardTitle">Entre ou crie sua conta</h2>
+                </div>
+                <div class="auth-tabs pill" role="tablist">
+                    <button class="auth-tab active" onclick="showLoginForm()" id="loginTab" aria-controls="loginForm" aria-selected="true">Login</button>
+                    <button class="auth-tab" onclick="showRegisterForm()" id="registerTab" aria-controls="registerForm" aria-selected="false">Registrar</button>
+                </div>
+                <!-- Login Form -->
+                <div class="auth-form" id="loginForm">
+                    <form id="loginFormElement" autocomplete="on">
+                        <div class="form-row">
+                            <label for="loginUsername">Usuário</label>
+                            <input type="text" id="loginUsername" name="username" minlength="3" maxlength="20" required placeholder="Seu nick" autocomplete="username">
+                        </div>
+                        <div class="form-row">
+                            <label for="loginPassword">Senha</label>
+                            <input type="password" id="loginPassword" name="password" required placeholder="••••••" autocomplete="current-password">
+                        </div>
+                        <div class="form-row captcha compact" id="loginCaptchaGroup" style="display:none;">
+                            <div class="captcha-head">
+                                <label for="loginCaptcha" class="captcha-label">Verificação</label>
+                                <span class="captcha-question" id="loginCaptchaQuestion"></span>
+                            </div>
+                            <input type="text" id="loginCaptcha" name="captcha_answer" placeholder="Resposta" autocomplete="off">
+                        </div>
+                        <button type="submit" class="btn-auth primary">Entrar<span class="material-symbols-rounded">login</span></button>
+                    </form>
+                </div>
+                <!-- Register Form -->
+                <div class="auth-form" id="registerForm" style="display:none;">
+                    <form id="registerFormElement" autocomplete="off">
+                        <div class="form-row">
+                            <label for="registerUsername">Usuário</label>
+                            <input type="text" id="registerUsername" name="username" minlength="3" maxlength="20" required placeholder="Novo nick">
+                            <small>3–20 caracteres</small>
+                        </div>
+                        <div class="form-row">
+                            <label for="registerPassword">Senha</label>
+                            <input type="password" id="registerPassword" name="password" minlength="6" required placeholder="Crie uma senha" autocomplete="new-password">
+                            <small>Mínimo 6 caracteres</small>
+                        </div>
+                        <div class="form-row">
+                            <label for="registerConfirmPassword">Confirmar</label>
+                            <input type="password" id="registerConfirmPassword" name="confirmPassword" required placeholder="Repita a senha" autocomplete="new-password">
+                        </div>
+                        <button type="submit" class="btn-auth gradient">Registrar<span class="material-symbols-rounded">person_add</span></button>
+                    </form>
+                </div>
+                <div class="auth-error" id="authError"></div>
+                <div class="auth-loading" id="authLoading" style="display:none;">
+                    <div class="loading-spinner"></div>
+                    <span>Conectando...</span>
+                </div>
+                <div class="auth-foot-note">
+                    <span class="foot-mini">Ao continuar você concorda com as regras da comunidade.</span>
+                </div>
             </div>
         </div>
     </div>
@@ -123,60 +142,7 @@
             </div>
         </div>
 
-        <!-- Admin Panel (hidden unless user is admin) -->
-        <div id="adminPanel" class="admin-panel" style="display:none;">
-            <h3>Admin Loot Management</h3>
-            <div class="admin-tabs">
-                <button class="admin-tab-link" data-target="adminItems">Items</button>
-                <button class="admin-tab-link" data-target="adminBoxes">Boxes</button>
-                <button class="admin-tab-link" data-target="adminImportExport">Import/Export</button>
-            </div>
-            <div class="admin-tab" id="adminItems" style="display:none;">
-                <h4>Items</h4>
-                <form id="adminItemForm" class="admin-form">
-                    <input name="id" placeholder="id" required>
-                    <select name="type">
-                        <option value="COLOR">COLOR</option>
-                        <option value="EFFECT">EFFECT</option>
-                        <option value="UPGRADE">UPGRADE</option>
-                        <option value="CURRENCY_PACK">CURRENCY</option>
-                    </select>
-                    <input name="name" placeholder="name" required>
-                    <select name="rarity">
-                        <option>COMMON</option><option>UNCOMMON</option><option>RARE</option><option>EPIC</option><option>LEGENDARY</option>
-                    </select>
-                    <input name="payload_color" placeholder="payload.color (#hex)">
-                    <input name="payload_effect" placeholder="payload.effect (glow/spark)">
-                    <input name="tags" placeholder="tags (comma)">
-                    <button type="submit">Upsert</button>
-                </form>
-                <div id="adminItemsList" class="admin-list"></div>
-            </div>
-            <div class="admin-tab" id="adminBoxes" style="display:none;">
-                <h4>Boxes</h4>
-                <form id="adminBoxForm" class="admin-form">
-                    <input name="id" placeholder="id" required>
-                    <input name="name" placeholder="name" required>
-                    <input name="price_coins" placeholder="price" type="number" min="0" required>
-                    <input name="drops" placeholder="drops item:weight;item2:weight" required>
-                    <input name="guaranteed" placeholder="guaranteed ids (comma)">
-                    <input name="rarity_bonus" placeholder='rarity_bonus JSON {"RARE":5}'>
-                    <input name="max_rolls" type="number" min="1" value="1" placeholder="max_rolls">
-                    <button type="submit">Upsert</button>
-                </form>
-                <div id="adminBoxesList" class="admin-list"></div>
-            </div>
-            <div class="admin-tab" id="adminImportExport" style="display:none;">
-                <h4>Import / Export</h4>
-                <div class="import-export">
-                    <button id="btnExportLoot" type="button">Export JSON</button>
-                    <textarea id="lootExportArea" placeholder="Export output" style="width:100%;height:120px;"></textarea>
-                    <textarea id="lootImportArea" placeholder='{"items":[],"boxes":[]}' style="width:100%;height:120px;"></textarea>
-                    <button id="btnImportLoot" type="button">Import</button>
-                    <div id="lootImportStatus" class="status-line"></div>
-                </div>
-            </div>
-        </div>
+    <!-- (Legacy standalone loot admin panel removed - integrated into main admin overlay) -->
 
         <!-- Floating Minimalist Color Palette -->
         <div class="color-palette-fixed minimized" id="colorPaletteFixed">
@@ -427,6 +393,7 @@
                     <button class="admin-tab active" data-target="usersTab" onclick="switchAdminSection(this)"><span class="material-symbols-rounded">group</span><span>Users</span></button>
                     <button class="admin-tab" data-target="statsTab" onclick="switchAdminSection(this)"><span class="material-symbols-rounded">analytics</span><span>Stats</span></button>
                     <button class="admin-tab" data-target="achievementsAdminTab" onclick="switchAdminSection(this)"><span class="material-symbols-rounded">emoji_events</span><span>Achievements</span></button>
+                    <button class="admin-tab" data-target="lootAdminTab" onclick="switchAdminSection(this)"><span class="material-symbols-rounded">inventory_2</span><span>Loot</span></button>
                 </div>
                 <div class="admin-sections">
                     <!-- Users -->
@@ -491,6 +458,48 @@
                             </div>
                         </div>
                     </section>
+                    <!-- Loot Management (integrated) -->
+                    <section id="lootAdminTab" class="admin-section" aria-label="Loot Management">
+                        <div class="section-toolbar">
+                            <div class="toolbar-left">
+                                <button class="btn" onclick="adminLoadItems()"><span class="material-symbols-rounded">refresh</span>Reload Items</button>
+                                <button class="btn" onclick="adminLoadBoxes()"><span class="material-symbols-rounded">refresh</span>Reload Boxes</button>
+                                <button class="btn" onclick="openLootEditor('item')"><span class="material-symbols-rounded">add</span>New Item</button>
+                                <button class="btn" onclick="openLootEditor('box')"><span class="material-symbols-rounded">inventory_2</span>New Box</button>
+                                <button class="btn" onclick="openTierEditor()"><span class="material-symbols-rounded">tune</span>Tiers</button>
+                            </div>
+                            <div class="toolbar-right" id="lootMeta"></div>
+                        </div>
+                        <div class="loot-admin-inner">
+                            <div class="loot-subtabs">
+                                <button class="loot-subtab active" data-target="adminItems" onclick="lootSubSwitch(this)">Items</button>
+                                <button class="loot-subtab" data-target="adminBoxes" onclick="lootSubSwitch(this)">Boxes</button>
+                                <button class="loot-subtab" data-target="adminImportExport" onclick="lootSubSwitch(this)">Import/Export</button>
+                            </div>
+                            <div class="loot-subpanes">
+                                <div id="adminItems" class="loot-pane" style="display:block;">
+                                    <h4>Items</h4>
+                                    <p class="inline-hint">Use <strong>New Item</strong> ou Edit para gerenciar. Form antigo removido.</p>
+                                    <div id="adminItemsList" class="admin-list"></div>
+                                </div>
+                                <div id="adminBoxes" class="loot-pane" style="display:none;">
+                                    <h4>Boxes</h4>
+                                    <p class="inline-hint">Use <strong>New Box</strong> ou Edit para gerenciar. Form antigo removido.</p>
+                                    <div id="adminBoxesList" class="admin-list"></div>
+                                </div>
+                                <div id="adminImportExport" class="loot-pane" style="display:none;">
+                                    <h4>Import / Export</h4>
+                                    <div class="import-export">
+                                        <button id="btnExportLoot" type="button">Export JSON</button>
+                                        <textarea id="lootExportArea" placeholder="Export output" style="width:100%;height:120px;"></textarea>
+                                        <textarea id="lootImportArea" placeholder='{"items":[],"boxes":[]}' style="width:100%;height:120px;"></textarea>
+                                        <button id="btnImportLoot" type="button">Import</button>
+                                        <div id="lootImportStatus" class="status-line"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
                 </div>
             </div>
         </div>
@@ -517,6 +526,87 @@
     </div>
 
     <script src="/static/js/app.js"></script>
+    <!-- Dynamic Item/Box Editor Modal -->
+    <div id="lootEditorModal" class="glass-readable loot-editor-modal" style="display:none;">
+        <div class="loot-editor-content">
+            <div class="loot-editor-header">
+                <h3 id="lootEditorTitle">New Item</h3>
+                <button onclick="closeLootEditor()" class="btn btn-icon"><span class="material-symbols-rounded">close</span></button>
+            </div>
+            <div class="loot-editor-body">
+                <div class="editor-left">
+                    <form id="lootEditorForm">
+                        <input type="hidden" name="mode" value="item" id="lootEditorMode">
+                        <div class="form-grid">
+                            <div class="field"><label for="loot-id">ID</label><input id="loot-id" name="id" required placeholder="unique_id" autocomplete="off"></div>
+                            <div class="field"><label for="loot-name">Name</label><input id="loot-name" name="name" required placeholder="Display name" autocomplete="off"></div>
+                            <div class="field" id="fieldTypeWrapper"><label for="lootTypeSelect">Type</label><select name="type" id="lootTypeSelect" onchange="lootEditorTypeChanged()"><option value="color">Color</option><option value="effect">Effect</option><option value="upgrade">Upgrade</option><option value="currency_pack">Currency Pack</option></select></div>
+                            <div class="field"><label for="lootRaritySelect">Rarity</label><select name="rarity" id="lootRaritySelect"></select></div>
+                        </div>
+                        <div class="conditional-group">
+                            <div class="field conditional field-color" style="display:none;"><label for="loot-color">Color</label><input id="loot-color" name="payload.color" type="text" placeholder="#ff00ff" oninput="updateLootPreview()"></div>
+                            <div class="field conditional field-effect" style="display:none;"><label for="loot-effect">Effect</label><select id="loot-effect" name="payload.effect" onchange="updateLootPreview()"><option value="">(none)</option><option value="glow">Glow</option><option value="spark">Spark</option></select></div>
+                            <div class="field conditional field-upgrade" style="display:none;"><label for="loot-upgrade-delta">Bag +</label><input id="loot-upgrade-delta" name="payload.max_pixel_bag_delta" type="number" min="1" step="1" value="5" oninput="updateLootPreview()"></div>
+                            <div class="field conditional field-currency_pack" style="display:none;"><label for="loot-coins">Coins</label><input id="loot-coins" name="payload.coins" type="number" min="1" step="1" value="100" oninput="updateLootPreview()"></div>
+                        </div>
+                        <div class="box-section box-only" style="display:none;">
+                            <h4 class="section-title">Box Settings</h4>
+                            <div class="form-grid box-grid">
+                                <div class="field"><label for="loot-price">Price (coins)</label><input id="loot-price" name="price_coins" type="number" min="0" value="0"></div>
+                                <div class="field"><label for="loot-max-rolls">Max Rolls</label><input id="loot-max-rolls" name="max_rolls" type="number" min="1" value="1"></div>
+                                <div class="field"><label for="loot-guaranteed">Guaranteed IDs</label><textarea id="loot-guaranteed" name="guaranteed" rows="2" placeholder="id1,id2"></textarea></div>
+                                <div class="field full-span"><label for="loot-rarity-bonus">Rarity Bonus JSON</label><textarea id="loot-rarity-bonus" name="rarity_bonus" rows="2" placeholder='{"rare":5}'></textarea></div>
+                            </div>
+                            <div class="drops-wrapper">
+                                <div class="drops-header">
+                                    <h5>Drops</h5>
+                                    <div class="drops-tools"><button type="button" class="btn small" onclick="addDropRow()" aria-label="Add drop"><span class="material-symbols-rounded">add</span></button></div>
+                                </div>
+                                <div class="drops-table" role="table" aria-label="Loot box drops">
+                                    <div class="drops-thead" role="rowgroup">
+                                        <div class="drops-row drops-head" role="row">
+                                            <div class="cell" role="columnheader">Item</div>
+                                            <div class="cell small" role="columnheader">Weight</div>
+                                            <div class="cell small" role="columnheader">%</div>
+                                            <div class="cell action" role="columnheader">Del</div>
+                                        </div>
+                                    </div>
+                                    <div class="drop-rows" id="dropRows" role="rowgroup"></div>
+                                </div>
+                                <p class="hint">Weights são relativos; % calculada automaticamente.</p>
+                            </div>
+                        </div>
+                        <div class="field"><label for="loot-tags">Tags</label><input id="loot-tags" name="tags" type="text" placeholder="tag1, tag2" oninput="updateLootPreview()"></div>
+                        <div class="editor-actions">
+                            <button type="button" class="btn" onclick="switchLootEditorMode()" id="switchModeBtn">Switch to Box</button>
+                            <button type="button" class="btn btn-primary" id="saveLootBtn" onclick="saveLootEditor()">Save</button>
+                        </div>
+                    </form>
+                </div>
+                <div class="editor-preview" id="lootEditorPreview">
+                    <h4>Preview</h4>
+                    <div class="preview-card" id="lootPreviewCard"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tier Editor Modal -->
+    <div id="tierEditorModal" class="glass-readable tier-editor-modal" style="display:none;">
+        <div class="tier-editor-content">
+            <div class="tier-editor-header">
+                <h3>Item Tiers</h3>
+                <button onclick="closeTierEditor()" class="btn btn-icon"><span class="material-symbols-rounded">close</span></button>
+            </div>
+            <div class="tier-editor-body">
+                <table class="tier-table" id="tierTable"><thead><tr><th>Rarity</th><th>Label</th><th>Color</th><th>Weight</th><th>Actions</th></tr></thead><tbody></tbody></table>
+                <div class="tier-actions">
+                    <button class="btn" type="button" onclick="addTier()"><span class="material-symbols-rounded" style="vertical-align:middle;font-size:18px;">add</span> Add Tier</button>
+                    <button class="btn btn-primary" onclick="saveTierConfig()">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
 </body>
 
 </html>

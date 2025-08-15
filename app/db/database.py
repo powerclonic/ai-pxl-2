@@ -4,7 +4,7 @@ Minimal initial schema to start migration away from flat JSON files.
 from __future__ import annotations
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Integer, DateTime, Boolean, JSON, UniqueConstraint
+from sqlalchemy import String, Integer, DateTime, Boolean, JSON, UniqueConstraint, text
 from datetime import datetime
 from app.core.config import settings
 
@@ -33,6 +33,38 @@ class UserORM(Base):
     experience_points: Mapped[int] = mapped_column(Integer, default=0)
     user_level: Mapped[int] = mapped_column(Integer, default=1)
     achievements: Mapped[list] = mapped_column(JSON, default=list)
+    coins: Mapped[int] = mapped_column(Integer, default=0)
+    owned_colors: Mapped[list] = mapped_column(JSON, default=list)
+    owned_effects: Mapped[list] = mapped_column(JSON, default=list)
+
+class ItemORM(Base):
+    __tablename__ = 'items'
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    type: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(128))
+    rarity: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+class LootBoxORM(Base):
+    __tablename__ = 'loot_boxes'
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    price_coins: Mapped[int] = mapped_column(Integer, default=0)
+    drops: Mapped[list] = mapped_column(JSON, default=list)  # list[{item_id,weight}]
+    guaranteed: Mapped[list] = mapped_column(JSON, default=list)
+    rarity_bonus: Mapped[dict] = mapped_column(JSON, default=dict)
+    max_rolls: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+class TierORM(Base):
+    __tablename__ = 'tiers'
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    label: Mapped[str] = mapped_column(String(128))
+    color: Mapped[str] = mapped_column(String(16))
+    weight: Mapped[int] = mapped_column(Integer, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class AchievementDefORM(Base):
     __tablename__ = 'achievement_defs'
@@ -51,6 +83,19 @@ class UserAchievementORM(Base):
     achievement_id: Mapped[str] = mapped_column(String(64))
     unlocked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     __table_args__ = (UniqueConstraint('user_id','achievement_id', name='uq_user_ach'), )
+
+class SessionORM(Base):
+    __tablename__ = 'sessions'
+    token: Mapped[str] = mapped_column(String(256), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+class SchemaVersionORM(Base):
+    __tablename__ = 'schema_version'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 engine = create_async_engine(
     settings.DATABASE_URL,
@@ -75,6 +120,37 @@ async def init_redis():
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Simple SQLite online migration for newly added columns (coins, owned_colors, owned_effects)
+        try:
+            res = await conn.exec_driver_sql("PRAGMA table_info(users);")
+            cols = {row[1] for row in res.fetchall()}
+            alter_stmts = []
+            if 'coins' not in cols:
+                alter_stmts.append("ALTER TABLE users ADD COLUMN coins INTEGER DEFAULT 0")
+            if 'owned_colors' not in cols:
+                alter_stmts.append("ALTER TABLE users ADD COLUMN owned_colors JSON DEFAULT '[]'")
+            if 'owned_effects' not in cols:
+                alter_stmts.append("ALTER TABLE users ADD COLUMN owned_effects JSON DEFAULT '[]'")
+            for stmt in alter_stmts:
+                try:
+                    await conn.exec_driver_sql(stmt)
+                except Exception as e:
+                    print(f"⚠️ Migration stmt failed ({stmt}): {e}")
+        except Exception as e:
+            print(f"⚠️ Could not inspect users table: {e}")
+        # Ensure schema version row
+        try:
+            res = await conn.exec_driver_sql("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
+            row = res.fetchone()
+            if not row:
+                await conn.exec_driver_sql("INSERT INTO schema_version(version) VALUES (1)")
+        except Exception:
+            # Table might not exist yet (older deploy) -> create manually
+            try:
+                await conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER, applied_at TIMESTAMP)")
+                await conn.exec_driver_sql("INSERT INTO schema_version(version) VALUES (1)")
+            except Exception as e2:
+                print(f"⚠️ Schema version ensure failed: {e2}")
     print('✅ Database schema ensured')
 
 async def init_infrastructure():
@@ -82,6 +158,8 @@ async def init_infrastructure():
     await init_redis()
 
 # Dependency
-async def get_session() -> AsyncSession:
+from typing import AsyncGenerator
+
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
     async with SessionLocal() as session:
         yield session
